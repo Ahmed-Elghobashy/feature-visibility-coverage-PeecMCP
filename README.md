@@ -50,6 +50,62 @@ It produces:
 - `clusters.csv`: cluster labels and example canonical queries
 - `run_metadata.json`: versions and run configuration
 
+## Example
+
+Sample prompts input:
+
+```csv
+prompt_id,prompt,response,engine
+p1,What are the best AI tools for qualifying B2B sales leads?,"PeecAI is useful for tracking AI visibility, while Salesforce and HubSpot are common CRM tools.",chatgpt
+p2,Which software can score inbound leads automatically?,"HubSpot and Salesforce are often mentioned for automatic lead scoring.",gemini
+p4,Best apps to track whether AI answers mention my new product feature,"PeecAI helps teams monitor brand and feature visibility in AI-generated answers.",chatgpt
+```
+
+Sample features input:
+
+```csv
+feature_id,feature_name,description
+f1,AI Lead Scoring,Automatically scores and qualifies sales leads using AI signals and CRM context.
+f2,Feature Visibility Monitor,Tracks whether AI systems mention launched product features and target brands in generated answers.
+```
+
+Sample brands input:
+
+```csv
+brand_id,brand_name
+b1,PeecAI
+b2,HubSpot
+b3,Salesforce
+```
+
+Example row-level output:
+
+```csv
+prompt_id,canonical_query,mapped_feature_name,cluster_label,brand_name,brand_present
+p1,best ai tools for qualifying b2b sales leads,AI Lead Scoring,best ai tools for qualifying b2b sales leads,PeecAI,True
+p2,automatic inbound lead scoring software options,AI Lead Scoring,best ai tools for qualifying b2b sales leads,PeecAI,False
+p2,automatic inbound lead scoring software options,AI Lead Scoring,best ai tools for qualifying b2b sales leads,HubSpot,True
+```
+
+Example coverage output:
+
+```csv
+brand_name,mapped_feature_name,cluster_label,prompt_count,brand_present_count,brand_absent_count,coverage_rate,coverage_status,present_prompt_ids,missing_prompt_ids
+PeecAI,AI Lead Scoring,best ai tools for qualifying b2b sales leads,3,2,1,0.6667,partial,p1;p3,p2
+HubSpot,AI Lead Scoring,best ai tools for qualifying b2b sales leads,3,2,1,0.6667,partial,p1;p2,p3
+PeecAI,Feature Visibility Monitor,Outlier / unique query,1,0,1,0.0,missing,,p5
+```
+
+PM-facing view:
+
+```text
+Brand: PeecAI
+Feature: AI Lead Scoring
+
+Demand cluster                              Coverage   Signal
+best ai tools for qualifying b2b sales leads  67%      Partial
+```
+
 ## Peec MCP Export
 
 Peec MCP is the live data layer for prompt/response observations.
