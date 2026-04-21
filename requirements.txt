@@ -1,0 +1,5 @@
+pandas>=2.0
+numpy>=1.24
+sentence-transformers>=2.7
+torch>=2.1
+mcp>=1.27

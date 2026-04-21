@@ -1,0 +1,10 @@
+.env
+.env.*
+.peec_mcp_tokens.json
+__pycache__/
+*.pyc
+outputs/
+outputs_*/
+data/peec_chats.csv
+*.pdf
+*.docx

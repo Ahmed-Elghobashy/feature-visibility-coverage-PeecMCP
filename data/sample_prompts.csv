@@ -1,0 +1,7 @@
+prompt_id,prompt,response,engine
+p1,What are the best AI tools for qualifying B2B sales leads?,"PeecAI is useful for tracking AI visibility, while Salesforce and HubSpot are common CRM tools.",chatgpt
+p2,Which software can score inbound leads automatically?,"HubSpot and Salesforce are often mentioned for automatic lead scoring.",gemini
+p3,Welche Tools helfen bei Lead-Qualifizierung mit KI?,"PeecAI can monitor whether AI assistants mention your launch features.",perplexity
+p4,Best apps to track whether AI answers mention my new product feature,"PeecAI helps teams monitor brand and feature visibility in AI-generated answers.",chatgpt
+p5,How can a PM measure if ChatGPT mentions a launched feature?,"Teams can manually test prompts or use visibility monitoring platforms.",gemini
+p6,أدوات لمراقبة ظهور العلامة التجارية في إجابات الذكاء الاصطناعي,"PeecAI tracks brand mentions across AI answer engines.",perplexity

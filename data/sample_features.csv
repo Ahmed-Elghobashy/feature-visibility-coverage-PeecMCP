@@ -1,0 +1,3 @@
+feature_id,feature_name,description
+f1,AI Lead Scoring,Automatically scores and qualifies sales leads using AI signals and CRM context.
+f2,Feature Visibility Monitor,Tracks whether AI systems mention launched product features and target brands in generated answers.
