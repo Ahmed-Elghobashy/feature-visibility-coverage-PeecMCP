@@ -4,8 +4,6 @@ This file captures extensions that are useful but not required for v0.5 or the f
 
 ## Detection
 
-- brand aliases in brands CSV
-- competitor alias support
 - feature-level LLM judge using response text plus feature description
 - confidence score per brand detection decision
 
@@ -14,7 +12,6 @@ This file captures extensions that are useful but not required for v0.5 or the f
 - engine-specific coverage and feature gaps
 - date-over-date trend outputs
 - confidence intervals for low sample clusters
-- deduplication across repeated prompt/model runs
 
 ## Product UX
 

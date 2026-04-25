@@ -47,6 +47,7 @@ RESPONSE_COLUMNS = ("response", "answer", "ai_response", "model_response", "outp
 FEATURE_NAME_COLUMNS = ("feature", "feature_name", "name", "title")
 FEATURE_DESCRIPTION_COLUMNS = ("description", "feature_description", "desc")
 BRAND_NAME_COLUMNS = ("brand", "brand_name", "name")
+BRAND_ALIAS_COLUMNS = ("aliases", "brand_aliases", "alias")
 
 
 @dataclass(frozen=True)
@@ -68,6 +69,7 @@ class Config:
     feature_threshold: float
     min_cluster_size: int
     min_coverage_n: int
+    aggregation_mode: str
 
 
 def main() -> int:
@@ -157,7 +159,7 @@ def main() -> int:
     ]
 
     brand_rows = expand_brand_rows(rows, brands, text_for_brand_detection, config)
-    coverage = build_coverage(brand_rows, config.min_coverage_n)
+    coverage = build_coverage(brand_rows, config.min_coverage_n, config.aggregation_mode)
     cluster_summary = build_cluster_summary(rows)
     target_brand = resolve_target_brand(brands, config)
     feature_gap_overview = build_feature_gap_overview(coverage, rows, target_brand)
@@ -263,6 +265,12 @@ def parse_args() -> Config:
         default=1,
         help="Minimum rows required before showing a numeric coverage rate.",
     )
+    parser.add_argument(
+        "--aggregation-mode",
+        choices=("response", "prompt", "prompt_model"),
+        default="response",
+        help="Counting unit for coverage: response rows, unique prompts, or unique prompt/model pairs.",
+    )
     args = parser.parse_args()
     if not args.brand and not args.brands:
         parser.error("Provide --brand for one brand or --brands for a brands CSV.")
@@ -285,6 +293,7 @@ def parse_args() -> Config:
         feature_threshold=args.feature_threshold,
         min_cluster_size=args.min_cluster_size,
         min_coverage_n=args.min_coverage_n,
+        aggregation_mode=args.aggregation_mode,
     )
 
 
@@ -311,18 +320,20 @@ def load_brands(config: Config) -> pd.DataFrame:
     if config.brands_csv:
         brands = pd.read_csv(config.brands_csv).copy()
         brand_name_col = pick_column(brands, BRAND_NAME_COLUMNS, "brands")
+        alias_col = pick_optional_column(brands, BRAND_ALIAS_COLUMNS)
         brands["brand_name"] = brands[brand_name_col].astype(str)
         brands["brand_id"] = ensure_id(brands, "brand_id", "brand")
+        brands["brand_aliases"] = brands[alias_col].fillna("").astype(str) if alias_col else ""
     else:
         assert config.brand
         brands = pd.DataFrame(
-            [{"brand_id": "brand_001", "brand_name": config.brand}]
+            [{"brand_id": "brand_001", "brand_name": config.brand, "brand_aliases": ""}]
         )
 
     brands = brands[brands["brand_name"].astype(str).str.strip() != ""].copy()
     if brands.empty:
         raise ValueError("No non-empty brands were provided.")
-    return brands[["brand_id", "brand_name"]].drop_duplicates().reset_index(drop=True)
+    return brands[["brand_id", "brand_name", "brand_aliases"]].drop_duplicates().reset_index(drop=True)
 
 
 def ensure_id(frame: pd.DataFrame, column: str, prefix: str) -> list[str]:
@@ -571,7 +582,27 @@ def map_features(
     return mappings
 
 
-def contains_brand(text: str, brand: str) -> bool:
+def split_aliases(value: object) -> list[str]:
+    if value is None:
+        return []
+    raw = str(value).strip()
+    if not raw or raw.casefold() == "nan":
+        return []
+    return [part.strip() for part in re.split(r"[|,;]", raw) if part.strip()]
+
+
+def brand_terms(brand: pd.Series) -> list[str]:
+    terms = [str(brand["brand_name"])]
+    terms.extend(split_aliases(brand.get("brand_aliases", "")))
+    return list(dict.fromkeys(term for term in terms if term.strip()))
+
+
+def contains_brand(text: str, brand: str | Sequence[str]) -> bool:
+    terms = [brand] if isinstance(brand, str) else list(brand)
+    return any(contains_brand_term(text, str(term)) for term in terms)
+
+
+def contains_brand_term(text: str, brand: str) -> bool:
     if not brand.strip():
         return False
     escaped = re.escape(brand.strip())
@@ -579,7 +610,7 @@ def contains_brand(text: str, brand: str) -> bool:
     return bool(re.search(pattern, text, flags=re.IGNORECASE))
 
 
-def judge_brand_openai(text: str, brand: str, model: str) -> bool:
+def judge_brand_openai(text: str, brand: str, model: str, aliases: Sequence[str] | None = None) -> bool:
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("--brand-detector openai requires OPENAI_API_KEY.")
@@ -602,6 +633,7 @@ def judge_brand_openai(text: str, brand: str, model: str) -> bool:
                 "content": json.dumps(
                     {
                         "brand": brand,
+                        "aliases": list(aliases or []),
                         "response": text,
                     },
                     ensure_ascii=False,
@@ -634,21 +666,25 @@ def judge_brand_openai(text: str, brand: str, model: str) -> bool:
     return bool(parsed.get("brand_present"))
 
 
-def detect_brand(text: str, brand: str, config: Config) -> bool:
+def detect_brand(text: str, brand: str, aliases: Sequence[str], config: Config) -> bool:
     if config.brand_detector == "openai":
-        return judge_brand_openai(text, brand, config.brand_detector_model)
+        return judge_brand_openai(text, brand, config.brand_detector_model, aliases)
     if config.brand_detector == "openai_mock":
-        return judge_brand_openai_mock(text, brand, config.brand_detector_model)
-    return contains_brand(text, brand)
+        return judge_brand_openai_mock(text, [brand, *aliases], config.brand_detector_model)
+    return contains_brand(text, [brand, *aliases])
 
 
-def judge_brand_openai_mock(text: str, brand: str, model: str) -> bool:
+def judge_brand_openai_mock(text: str, brand: str | Sequence[str], model: str) -> bool:
     del model
     if contains_brand(text, brand):
         return True
     collapsed_text = re.sub(r"[\s_-]+", "", text.casefold())
-    collapsed_brand = re.sub(r"[\s_-]+", "", brand.casefold())
-    return collapsed_brand in collapsed_text if collapsed_brand else False
+    terms = [brand] if isinstance(brand, str) else list(brand)
+    for term in terms:
+        collapsed_brand = re.sub(r"[\s_-]+", "", str(term).casefold())
+        if collapsed_brand and collapsed_brand in collapsed_text:
+            return True
+    return False
 
 
 def expand_brand_rows(
@@ -663,27 +699,56 @@ def expand_brand_rows(
     for _, brand in brands.iterrows():
         brand_rows = base.copy()
         brand_name = str(brand["brand_name"])
+        aliases = split_aliases(brand.get("brand_aliases", ""))
         brand_rows["brand_id"] = str(brand["brand_id"])
         brand_rows["brand_name"] = brand_name
+        brand_rows["brand_aliases"] = "|".join(aliases)
         brand_rows["brand_present"] = [
-            detect_brand(text, brand_name, config)
+            detect_brand(text, brand_name, aliases, config)
             for text in detection_values.astype(str)
         ]
         expanded.append(brand_rows)
     return pd.concat(expanded, ignore_index=True)
 
 
-def build_coverage(rows: pd.DataFrame, min_coverage_n: int) -> pd.DataFrame:
+def coverage_unit_columns(rows: pd.DataFrame, aggregation_mode: str) -> list[str]:
+    if aggregation_mode == "prompt":
+        return ["prompt_id"]
+    if aggregation_mode == "prompt_model":
+        for candidate in ("model", "model_name", "model_id", "engine"):
+            if candidate in rows.columns:
+                return ["prompt_id", candidate]
+        return ["prompt_id"]
+    return []
+
+
+def aggregate_coverage_group(group: pd.DataFrame, aggregation_mode: str) -> pd.DataFrame:
+    unit_cols = coverage_unit_columns(group, aggregation_mode)
+    if not unit_cols:
+        return group.copy()
+
+    records: list[dict[str, object]] = []
+    for _, unit in group.groupby(unit_cols, dropna=False, sort=False):
+        first = unit.iloc[0].to_dict()
+        first["brand_present"] = bool(unit["brand_present"].any())
+        first["prompt_id"] = join_ids(unit["prompt_id"])
+        records.append(first)
+    return pd.DataFrame.from_records(records)
+
+
+def build_coverage(rows: pd.DataFrame, min_coverage_n: int, aggregation_mode: str = "response") -> pd.DataFrame:
     matched = rows[rows["mapped_feature_id"].astype(str) != ""].copy()
     if matched.empty:
         return pd.DataFrame(
             columns=[
                 "brand_id",
                 "brand_name",
+                "brand_aliases",
                 "mapped_feature_id",
                 "mapped_feature_name",
                 "cluster_id",
                 "cluster_label",
+                "aggregation_mode",
                 "prompt_count",
                 "brand_present_count",
                 "brand_absent_count",
@@ -698,14 +763,16 @@ def build_coverage(rows: pd.DataFrame, min_coverage_n: int) -> pd.DataFrame:
     group_cols = [
         "brand_id",
         "brand_name",
+        "brand_aliases",
         "mapped_feature_id",
         "mapped_feature_name",
         "cluster_id",
         "cluster_label",
     ]
     for keys, group in matched.groupby(group_cols, dropna=False, sort=True):
-        prompt_count = len(group)
-        present = int(group["brand_present"].sum())
+        unit_group = aggregate_coverage_group(group, aggregation_mode)
+        prompt_count = len(unit_group)
+        present = int(unit_group["brand_present"].sum())
         missing = prompt_count - present
         coverage_rate = present / prompt_count if prompt_count >= min_coverage_n else ""
         status = (
@@ -721,17 +788,19 @@ def build_coverage(rows: pd.DataFrame, min_coverage_n: int) -> pd.DataFrame:
             {
                 "brand_id": keys[0],
                 "brand_name": keys[1],
-                "mapped_feature_id": keys[2],
-                "mapped_feature_name": keys[3],
-                "cluster_id": keys[4],
-                "cluster_label": keys[5],
+                "brand_aliases": keys[2],
+                "mapped_feature_id": keys[3],
+                "mapped_feature_name": keys[4],
+                "cluster_id": keys[5],
+                "cluster_label": keys[6],
+                "aggregation_mode": aggregation_mode,
                 "prompt_count": prompt_count,
                 "brand_present_count": present,
                 "brand_absent_count": missing,
                 "coverage_rate": coverage_rate,
                 "coverage_status": status,
-                "present_prompt_ids": join_ids(group[group["brand_present"]]["prompt_id"]),
-                "missing_prompt_ids": join_ids(group[~group["brand_present"]]["prompt_id"]),
+                "present_prompt_ids": join_ids(unit_group[unit_group["brand_present"]]["prompt_id"]),
+                "missing_prompt_ids": join_ids(unit_group[~unit_group["brand_present"]]["prompt_id"]),
             }
         )
     return pd.DataFrame.from_records(records).sort_values(
@@ -782,15 +851,48 @@ def consistency_band(visibility_share: float) -> str:
     return "low"
 
 
-def gap_severity(visibility_share: float, competitor_visibility_share: float) -> str:
-    if competitor_visibility_share > 0 and visibility_share < 0.40:
-        return "high"
+def visibility_status(visibility_share: float) -> str:
+    if visibility_share == 0:
+        return "missing"
     if visibility_share < 0.70:
+        return "inconsistent"
+    return "strong"
+
+
+def is_feature_visibility_gap(visibility_share: float, competitor_present: bool) -> bool:
+    return competitor_present and visibility_share < 0.70
+
+
+def gap_category(visibility_share: float, competitor_present: bool) -> str:
+    if is_feature_visibility_gap(visibility_share, competitor_present):
+        return "competitive_gap"
+    if visibility_share < 0.70:
+        return "weak_category_visibility"
+    return "strong_presence"
+
+
+def gap_severity(visibility_share: float, competitor_present: bool) -> str:
+    if competitor_present and visibility_share < 0.40:
+        return "high"
+    if competitor_present and visibility_share < 0.70:
         return "medium"
     return "low"
 
 
-def severity_signal(severity: str) -> str:
+def gap_reason(visibility_share: float, competitor_present: bool) -> str:
+    status = visibility_status(visibility_share)
+    if competitor_present and status == "missing":
+        return "Feature intent is present, competitors appear, and the target brand is missing."
+    if competitor_present and status == "inconsistent":
+        return "Feature intent is present, competitors appear, and the target brand is inconsistently present."
+    if status in {"missing", "inconsistent"}:
+        return "Feature intent is present and the target brand is weak, but tracked competitors are not present."
+    return "The target brand has strong presence for this feature cluster."
+
+
+def severity_signal(severity: str, category: str = "") -> str:
+    if category == "weak_category_visibility":
+        return "Weak category visibility"
     if severity == "high":
         return "Consistently missing — opportunity"
     if severity == "medium":
@@ -842,27 +944,40 @@ def build_feature_gap_overview(
             & (coverage["brand_id"] != target_brand_id)
         )
         competitor_rows = coverage[cluster_mask].copy()
-        competitor_rows["coverage_rate"] = competitor_rows["coverage_rate"].fillna(0.0)
+        competitor_rows["coverage_rate"] = pd.to_numeric(
+            competitor_rows["coverage_rate"],
+            errors="coerce",
+        ).fillna(0.0)
         competitor_rows = competitor_rows.sort_values("coverage_rate", ascending=False)
         top_competitor = competitor_rows.iloc[0] if not competitor_rows.empty else None
         competitor_visibility_share = float(top_competitor["coverage_rate"]) if top_competitor is not None else 0.0
         competitor_present_count = int((competitor_rows["brand_present_count"] > 0).sum()) if not competitor_rows.empty else 0
-        visibility_share = float(target_row["coverage_rate"]) if target_row["coverage_rate"] != "" else 0.0
+        competitor_present = competitor_present_count > 0
+        visibility_share = float(pd.to_numeric(pd.Series([target_row["coverage_rate"]]), errors="coerce").fillna(0.0).iloc[0])
         consistency = consistency_band(visibility_share)
-        severity = gap_severity(visibility_share, competitor_visibility_share)
+        status = visibility_status(visibility_share)
+        category = gap_category(visibility_share, competitor_present)
+        is_gap = is_feature_visibility_gap(visibility_share, competitor_present)
+        severity = gap_severity(visibility_share, competitor_present)
         key = (target_row["mapped_feature_id"], target_row["cluster_id"])
         overview_records.append(
             {
                 "target_brand_id": target_brand_id,
                 "target_brand_name": target_brand_name,
+                "feature_intent_detected": True,
                 "mapped_feature_id": target_row["mapped_feature_id"],
                 "mapped_feature_name": target_row["mapped_feature_name"],
                 "cluster_id": target_row["cluster_id"],
                 "cluster_label": target_row["cluster_label"],
                 "visibility_share": round(visibility_share, 4),
                 "consistency_band": consistency,
+                "target_visibility_status": status,
+                "competitor_present": competitor_present,
+                "is_feature_visibility_gap": is_gap,
+                "gap_category": category,
                 "gap_severity": severity,
-                "signal": severity_signal(severity),
+                "gap_reason": gap_reason(visibility_share, competitor_present),
+                "signal": severity_signal(severity, category),
                 "prompt_count": int(target_row["prompt_count"]),
                 "target_brand_present_count": int(target_row["brand_present_count"]),
                 "target_brand_absent_count": int(target_row["brand_absent_count"]),
@@ -978,6 +1093,7 @@ def write_outputs(
         "feature_threshold": config.feature_threshold,
         "min_cluster_size": config.min_cluster_size,
         "min_coverage_n": config.min_coverage_n,
+        "aggregation_mode": config.aggregation_mode,
     }
     (output_dir / "run_metadata.json").write_text(
         json.dumps(metadata, indent=2) + "\n",

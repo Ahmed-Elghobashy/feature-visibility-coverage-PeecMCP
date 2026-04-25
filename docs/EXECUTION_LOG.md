@@ -87,6 +87,33 @@ Planned next UI slices:
 - clickable cluster-detail drilldown
 - direct Peec export trigger from the UI
 
+## Robustness Iteration
+
+Status: completed on 2026-04-25.
+
+Delivered:
+
+- strict feature visibility gap fields:
+  - `feature_intent_detected`
+  - `competitor_present`
+  - `target_visibility_status`
+  - `is_feature_visibility_gap`
+  - `gap_category`
+  - `gap_reason`
+- brand aliases through `aliases`, `brand_aliases`, or `alias` columns
+- coverage aggregation modes:
+  - `response`
+  - `prompt`
+  - `prompt_model`
+- UI labels now distinguish strict gaps from weak category visibility
+- unit tests for aliases, aggregation, and gap classification
+
+Verification:
+
+- `python3 -m unittest discover -s tests`
+- `python3 -m py_compile src/visibility_mvp.py src/feature_visibility_mcp.py ui/app.py`
+- CLI smoke test with `--aggregation-mode prompt`
+
 ## Notes
 
 - Peec MCP remains the raw data source.

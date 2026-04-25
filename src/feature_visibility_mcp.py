@@ -162,6 +162,7 @@ def run_visibility_coverage(
     feature_threshold: float = 0.2,
     min_cluster_size: int = 2,
     min_coverage_n: int = 1,
+    aggregation_mode: str = "response",
 ) -> dict[str, Any]:
     """
     Run the coverage pipeline and return output paths plus a preview of feature gaps.
@@ -200,6 +201,8 @@ def run_visibility_coverage(
         str(min_cluster_size),
         "--min-coverage-n",
         str(min_coverage_n),
+        "--aggregation-mode",
+        aggregation_mode,
     ]
     if brands_csv:
         args.extend(["--brands", str(Path(brands_csv).expanduser().resolve())])

@@ -355,6 +355,14 @@ Brands CSV:
 
 - Required name: one of `brand`, `brand_name`, `name`
 - Optional ID: `brand_id`
+- Optional aliases: one of `aliases`, `brand_aliases`, `alias`
+
+Alias values can be separated by `|`, `,`, or `;`:
+
+```csv
+brand_id,brand_name,aliases
+b1,Peec AI,"PeecAI|peec.ai|Peec"
+```
 
 If a response column exists, brand coverage is detected in the response. If no response column exists, coverage is detected in the original prompt text, which supports the prompt-only MVP path.
 
@@ -364,6 +372,37 @@ For feature-gap reporting, set the target brand explicitly:
 
 ```bash
 --target-brand "Peec AI"
+```
+
+Coverage can be counted at different levels:
+
+```bash
+--aggregation-mode response
+--aggregation-mode prompt
+--aggregation-mode prompt_model
+```
+
+`response` keeps every row. `prompt` deduplicates repeated runs of the same prompt.
+`prompt_model` deduplicates repeated runs of the same prompt on the same model or
+engine when that metadata exists.
+
+Feature visibility gaps are explicit in `feature_gap_overview.csv`:
+
+```text
+feature_intent_detected
+competitor_present
+target_visibility_status
+is_feature_visibility_gap
+gap_category
+gap_reason
+```
+
+A strict feature visibility gap requires:
+
+```text
+feature_intent_detected = true
+competitor_present = true
+target visibility below 70%
 ```
 
 ## Normalization
@@ -397,7 +436,7 @@ For fast iteration without a live LLM call:
 
 Choose one detector:
 
-- `keyword` default: exact case-insensitive brand-name match in the AI response. Best for auditable baseline reporting.
+- `keyword` default: exact case-insensitive brand-name or alias match in the AI response. Best for auditable baseline reporting.
 - `openai`: LLM judge decides whether the AI response explicitly mentions the brand, product, or obvious spelling/spacing variant. Best for messy responses; requires `OPENAI_API_KEY`.
 - `openai_mock`: local mock path for fast testing without external calls.
 

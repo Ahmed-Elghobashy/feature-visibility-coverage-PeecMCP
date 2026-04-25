@@ -1,4 +1,4 @@
-brand_id,brand_name
-b1,PeecAI
-b2,HubSpot
-b3,Salesforce
+brand_id,brand_name,aliases
+b1,PeecAI,"Peec AI|peec.ai"
+b2,HubSpot,"Hub Spot|hubspot.com"
+b3,Salesforce,"Salesforce CRM|salesforce.com"

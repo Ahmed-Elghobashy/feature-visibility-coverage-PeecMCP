@@ -131,6 +131,8 @@ def render_overview_cards(overview: pd.DataFrame) -> None:
             top[3].markdown(f"**Top competitor**  \n{row['top_competitor_brand_name'] or '-'}")
             st.markdown(render_share_bar(row["visibility_share"]), unsafe_allow_html=True)
             st.caption(
+                f"Category: {row.get('gap_category', '-')} | "
+                f"Strict gap: {bool(row.get('is_feature_visibility_gap', False))} | "
                 f"Consistency: {row['consistency_band']} | "
                 f"Gap severity: {row['gap_severity']} | "
                 f"Prompt count: {int(row['prompt_count'])}"
@@ -160,6 +162,7 @@ def render_feature_detail(overview: pd.DataFrame, details: pd.DataFrame) -> None
             cols[3].markdown(f"**Top competitor**  \n{row['top_competitor_brand_name'] or '-'}")
 
             st.markdown(render_share_bar(row["visibility_share"]), unsafe_allow_html=True)
+            st.caption(f"Category: {row.get('gap_category', '-')} | Reason: {row.get('gap_reason', '-')}")
             st.caption(f"Top query: {row['top_query']}")
 
             detail_rows = details[
@@ -198,12 +201,12 @@ def render_results(result: dict[str, Any]) -> None:
     )
 
     if not overview.empty:
-        highest_gap_count = int((overview["gap_severity"].astype(str) == "high").sum())
+        strict_gap_count = int(overview.get("is_feature_visibility_gap", pd.Series(dtype=bool)).fillna(False).astype(bool).sum())
         avg_visibility = overview["visibility_share"].astype(float).mean()
         feature_count = int(overview["mapped_feature_name"].nunique())
         cluster_count = int(overview["cluster_id"].nunique())
         kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-        kpi1.metric("High severity gaps", highest_gap_count)
+        kpi1.metric("Strict gaps", strict_gap_count)
         kpi2.metric("Average visibility", as_percent(avg_visibility))
         kpi3.metric("Features covered", feature_count)
         kpi4.metric("Demand clusters", cluster_count)

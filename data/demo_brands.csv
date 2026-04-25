@@ -1,5 +1,5 @@
-brand_id,brand_name
-b1,Peec AI
-b2,Profound
-b3,Writesonic
-b4,Brandwatch
+brand_id,brand_name,aliases
+b1,Peec AI,"PeecAI|peec.ai|Peec"
+b2,Profound,"Profound AI|tryprofound.com"
+b3,Writesonic,"Writesonic AI|Chatsonic"
+b4,Brandwatch,"Brandwatch Consumer Intelligence"
