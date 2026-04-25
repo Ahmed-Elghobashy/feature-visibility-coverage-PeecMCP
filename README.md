@@ -48,6 +48,9 @@ It produces:
 - `query_mapping.csv`: original prompt -> canonical query -> cluster -> mapped feature -> brand present/absent per tracked brand
 - `coverage_by_feature_cluster.csv`: coverage per brand, mapped feature, and demand cluster
 - `clusters.csv`: cluster labels and example canonical queries
+- `feature_gap_overview.csv`: target-brand feature visibility gaps with competitor comparison
+- `feature_gap_details.csv`: expanded gap diagnostics
+- `feature_gap_summary.md`: PM-facing summary view
 - `run_metadata.json`: versions and run configuration
 
 ## Example
@@ -154,9 +157,10 @@ Run coverage on the enriched CSV:
 ```bash
 python3 src/visibility_mvp.py \
   --prompts data/peec_chats.csv \
-  --features data/sample_features.csv \
-  --brands data/sample_brands.csv \
-  --normalizer openai \
+  --features data/demo_features.csv \
+  --brands data/demo_brands.csv \
+  --target-brand "Peec AI" \
+  --normalizer openai_mock \
   --embedding-backend bge-m3 \
   --output-dir outputs_peec
 ```
@@ -255,6 +259,12 @@ If a response column exists, brand coverage is detected in the response. If no r
 
 For one-off runs, `--brand PeecAI` still works. For agency workflows tracking several brands, use `--brands data/sample_brands.csv`.
 
+For feature-gap reporting, set the target brand explicitly:
+
+```bash
+--target-brand "Peec AI"
+```
+
 ## Normalization
 
 By default, prompt compression uses a deterministic heuristic normalizer. To use an LLM normalizer:
@@ -276,12 +286,19 @@ OPENAI_API_KEY=sk-...
 
 The LLM normalizer returns a short canonical query, while `query_mapping.csv` keeps the original prompt ID and text so coverage can always be traced back to source prompts.
 
+For fast iteration without a live LLM call:
+
+```bash
+--normalizer openai_mock
+```
+
 ## Brand Presence Detection
 
 Choose one detector:
 
 - `keyword` default: exact case-insensitive brand-name match in the AI response. Best for auditable baseline reporting.
 - `openai`: LLM judge decides whether the AI response explicitly mentions the brand, product, or obvious spelling/spacing variant. Best for messy responses; requires `OPENAI_API_KEY`.
+- `openai_mock`: local mock path for fast testing without external calls.
 
 ```bash
 python3 src/visibility_mvp.py \

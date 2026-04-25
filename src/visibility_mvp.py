@@ -11,6 +11,7 @@ Outputs:
   - row-level query mapping
   - brand x feature x cluster coverage
   - cluster summary
+  - feature visibility gap overview and detail outputs
 
 The default embedding backend is BAAI/bge-m3 through sentence-transformers.
 When sentence-transformers is unavailable, use --embedding-backend hash for a
@@ -54,6 +55,8 @@ class Config:
     features_csv: Path
     brand: str | None
     brands_csv: Path | None
+    target_brand: str | None
+    target_brand_id: str | None
     output_dir: Path
     embedding_backend: str
     embedding_model: str
@@ -89,6 +92,8 @@ def main() -> int:
     normalizer_version = (
         f"openai:{config.normalizer_model}"
         if config.normalizer == "openai"
+        else f"openai-mock:{config.normalizer_model}"
+        if config.normalizer == "openai_mock"
         else "heuristic:v1"
     )
     prompts["canonical_query"] = [
@@ -139,6 +144,8 @@ def main() -> int:
     rows["detector_version"] = (
         f"openai:{config.brand_detector_model}"
         if config.brand_detector == "openai"
+        else f"openai-mock:{config.brand_detector_model}"
+        if config.brand_detector == "openai_mock"
         else "casefold-word-boundary:v1"
     )
     rows["mapped_feature_id"] = [m["feature_id"] for m in feature_mapping]
@@ -152,9 +159,24 @@ def main() -> int:
     brand_rows = expand_brand_rows(rows, brands, text_for_brand_detection, config)
     coverage = build_coverage(brand_rows, config.min_coverage_n)
     cluster_summary = build_cluster_summary(rows)
+    target_brand = resolve_target_brand(brands, config)
+    feature_gap_overview = build_feature_gap_overview(coverage, rows, target_brand)
+    feature_gap_details = build_feature_gap_details(coverage, rows, target_brand)
+    pm_summary = build_pm_summary(feature_gap_overview, target_brand)
 
-    write_outputs(config.output_dir, brand_rows, coverage, cluster_summary, config, brands)
-    print_summary(config.output_dir, brand_rows, coverage, config, brands)
+    write_outputs(
+        config.output_dir,
+        brand_rows,
+        coverage,
+        cluster_summary,
+        feature_gap_overview,
+        feature_gap_details,
+        pm_summary,
+        config,
+        brands,
+        target_brand,
+    )
+    print_summary(config.output_dir, brand_rows, coverage, feature_gap_overview, target_brand, config, brands)
     return 0
 
 
@@ -169,6 +191,14 @@ def parse_args() -> Config:
         "--brands",
         type=Path,
         help="CSV of target brands. Expected columns include brand_id and brand_name/name/brand.",
+    )
+    parser.add_argument(
+        "--target-brand",
+        help="Target brand name for feature visibility gap reporting.",
+    )
+    parser.add_argument(
+        "--target-brand-id",
+        help="Target brand id for feature visibility gap reporting. Overrides --target-brand.",
     )
     parser.add_argument(
         "--output-dir",
@@ -189,7 +219,7 @@ def parse_args() -> Config:
     )
     parser.add_argument(
         "--normalizer",
-        choices=("heuristic", "openai"),
+        choices=("heuristic", "openai", "openai_mock"),
         default="heuristic",
         help="Prompt compression backend.",
     )
@@ -200,7 +230,7 @@ def parse_args() -> Config:
     )
     parser.add_argument(
         "--brand-detector",
-        choices=("keyword", "openai"),
+        choices=("keyword", "openai", "openai_mock"),
         default="keyword",
         help="Brand presence detector: keyword is exact/auditable; openai is LLM-judge based.",
     )
@@ -242,6 +272,8 @@ def parse_args() -> Config:
         features_csv=args.features,
         brand=args.brand,
         brands_csv=args.brands,
+        target_brand=args.target_brand,
+        target_brand_id=args.target_brand_id,
         output_dir=args.output_dir,
         embedding_backend=args.embedding_backend,
         embedding_model=args.embedding_model,
@@ -303,6 +335,8 @@ def ensure_id(frame: pd.DataFrame, column: str, prefix: str) -> list[str]:
 def normalize_prompt(prompt: str, config: Config, brands: pd.DataFrame) -> str:
     if config.normalizer == "openai":
         return normalize_prompt_openai(prompt, config.normalizer_model, brands)
+    if config.normalizer == "openai_mock":
+        return normalize_prompt_openai_mock(prompt, config.normalizer_model, brands)
     return normalize_prompt_heuristic(prompt, brands["brand_name"].tolist())
 
 
@@ -358,6 +392,12 @@ def normalize_prompt_openai(prompt: str, model: str, brands: pd.DataFrame) -> st
 
     content = body["choices"][0]["message"]["content"]
     return re.sub(r"\s+", " ", content.strip().casefold())
+
+
+def normalize_prompt_openai_mock(prompt: str, model: str, brands: pd.DataFrame) -> str:
+    del model
+    text = normalize_prompt_heuristic(prompt, brands["brand_name"].tolist())
+    return " ".join(text.split()[:8]) if text else "empty query"
 
 
 def load_dotenv(path: Path) -> None:
@@ -597,7 +637,18 @@ def judge_brand_openai(text: str, brand: str, model: str) -> bool:
 def detect_brand(text: str, brand: str, config: Config) -> bool:
     if config.brand_detector == "openai":
         return judge_brand_openai(text, brand, config.brand_detector_model)
+    if config.brand_detector == "openai_mock":
+        return judge_brand_openai_mock(text, brand, config.brand_detector_model)
     return contains_brand(text, brand)
+
+
+def judge_brand_openai_mock(text: str, brand: str, model: str) -> bool:
+    del model
+    if contains_brand(text, brand):
+        return True
+    collapsed_text = re.sub(r"[\s_-]+", "", text.casefold())
+    collapsed_brand = re.sub(r"[\s_-]+", "", brand.casefold())
+    return collapsed_brand in collapsed_text if collapsed_brand else False
 
 
 def expand_brand_rows(
@@ -709,6 +760,183 @@ def build_cluster_summary(rows: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def resolve_target_brand(brands: pd.DataFrame, config: Config) -> pd.Series:
+    if config.target_brand_id:
+        matched = brands[brands["brand_id"].astype(str) == str(config.target_brand_id)]
+        if matched.empty:
+            raise ValueError(f"Target brand id {config.target_brand_id!r} was not found in brands CSV.")
+        return matched.iloc[0]
+    if config.target_brand:
+        matched = brands[brands["brand_name"].astype(str).str.casefold() == str(config.target_brand).casefold()]
+        if matched.empty:
+            raise ValueError(f"Target brand {config.target_brand!r} was not found in brands CSV.")
+        return matched.iloc[0]
+    return brands.iloc[0]
+
+
+def consistency_band(visibility_share: float) -> str:
+    if visibility_share >= 0.70:
+        return "high"
+    if visibility_share >= 0.40:
+        return "medium"
+    return "low"
+
+
+def gap_severity(visibility_share: float, competitor_visibility_share: float) -> str:
+    if competitor_visibility_share > 0 and visibility_share < 0.40:
+        return "high"
+    if visibility_share < 0.70:
+        return "medium"
+    return "low"
+
+
+def severity_signal(severity: str) -> str:
+    if severity == "high":
+        return "Consistently missing — opportunity"
+    if severity == "medium":
+        return "Partial — worth investigating"
+    return "Strong presence"
+
+
+def dedupe_join(values: Iterable[object], limit: int | None = None) -> str:
+    seen: list[str] = []
+    for value in values:
+        value = str(value)
+        if value and value not in seen:
+            seen.append(value)
+    if limit is not None:
+        seen = seen[:limit]
+    return ";".join(seen)
+
+
+def build_feature_gap_overview(
+    coverage: pd.DataFrame,
+    rows: pd.DataFrame,
+    target_brand: pd.Series,
+) -> pd.DataFrame:
+    if coverage.empty:
+        return pd.DataFrame()
+
+    target_brand_id = str(target_brand["brand_id"])
+    target_brand_name = str(target_brand["brand_name"])
+    target_coverage = coverage[coverage["brand_id"].astype(str) == target_brand_id].copy()
+    if target_coverage.empty:
+        return pd.DataFrame()
+
+    all_example_queries = (
+        rows.groupby(["mapped_feature_id", "cluster_id"], dropna=False)["canonical_query"]
+        .apply(lambda values: dedupe_join(values, limit=5))
+        .to_dict()
+    )
+    top_query_map = (
+        rows.groupby(["mapped_feature_id", "cluster_id"], dropna=False)["canonical_query"]
+        .agg(lambda values: pd.Series(list(values)).value_counts().index[0])
+        .to_dict()
+    )
+
+    overview_records: list[dict[str, object]] = []
+    for _, target_row in target_coverage.iterrows():
+        cluster_mask = (
+            (coverage["mapped_feature_id"] == target_row["mapped_feature_id"])
+            & (coverage["cluster_id"] == target_row["cluster_id"])
+            & (coverage["brand_id"] != target_brand_id)
+        )
+        competitor_rows = coverage[cluster_mask].copy()
+        competitor_rows["coverage_rate"] = competitor_rows["coverage_rate"].fillna(0.0)
+        competitor_rows = competitor_rows.sort_values("coverage_rate", ascending=False)
+        top_competitor = competitor_rows.iloc[0] if not competitor_rows.empty else None
+        competitor_visibility_share = float(top_competitor["coverage_rate"]) if top_competitor is not None else 0.0
+        competitor_present_count = int((competitor_rows["brand_present_count"] > 0).sum()) if not competitor_rows.empty else 0
+        visibility_share = float(target_row["coverage_rate"]) if target_row["coverage_rate"] != "" else 0.0
+        consistency = consistency_band(visibility_share)
+        severity = gap_severity(visibility_share, competitor_visibility_share)
+        key = (target_row["mapped_feature_id"], target_row["cluster_id"])
+        overview_records.append(
+            {
+                "target_brand_id": target_brand_id,
+                "target_brand_name": target_brand_name,
+                "mapped_feature_id": target_row["mapped_feature_id"],
+                "mapped_feature_name": target_row["mapped_feature_name"],
+                "cluster_id": target_row["cluster_id"],
+                "cluster_label": target_row["cluster_label"],
+                "visibility_share": round(visibility_share, 4),
+                "consistency_band": consistency,
+                "gap_severity": severity,
+                "signal": severity_signal(severity),
+                "prompt_count": int(target_row["prompt_count"]),
+                "target_brand_present_count": int(target_row["brand_present_count"]),
+                "target_brand_absent_count": int(target_row["brand_absent_count"]),
+                "top_competitor_brand_id": str(top_competitor["brand_id"]) if top_competitor is not None else "",
+                "top_competitor_brand_name": str(top_competitor["brand_name"]) if top_competitor is not None else "",
+                "top_competitor_visibility_share": round(competitor_visibility_share, 4),
+                "competitor_present_count": competitor_present_count,
+                "top_query": top_query_map.get(key, ""),
+                "example_queries": all_example_queries.get(key, ""),
+                "present_prompt_ids": target_row["present_prompt_ids"],
+                "missing_prompt_ids": target_row["missing_prompt_ids"],
+            }
+        )
+    return pd.DataFrame.from_records(overview_records).sort_values(
+        ["gap_severity", "visibility_share", "mapped_feature_name"],
+        ascending=[True, True, True],
+    )
+
+
+def build_feature_gap_details(
+    coverage: pd.DataFrame,
+    rows: pd.DataFrame,
+    target_brand: pd.Series,
+) -> pd.DataFrame:
+    overview = build_feature_gap_overview(coverage, rows, target_brand)
+    if overview.empty:
+        return pd.DataFrame()
+
+    detail_records: list[dict[str, object]] = []
+    for _, overview_row in overview.iterrows():
+        cluster_rows = coverage[
+            (coverage["mapped_feature_id"] == overview_row["mapped_feature_id"])
+            & (coverage["cluster_id"] == overview_row["cluster_id"])
+        ].copy()
+        brand_comparison = (
+            cluster_rows[["brand_id", "brand_name", "coverage_rate", "brand_present_count", "brand_absent_count"]]
+            .fillna("")
+            .to_dict(orient="records")
+        )
+        example_queries = rows[
+            (rows["mapped_feature_id"] == overview_row["mapped_feature_id"])
+            & (rows["cluster_id"] == overview_row["cluster_id"])
+        ]["canonical_query"]
+        detail_records.append(
+            {
+                **overview_row.to_dict(),
+                "brand_comparison_json": json.dumps(brand_comparison, ensure_ascii=False),
+                "example_queries_json": json.dumps(list(dict.fromkeys(example_queries.tolist()))[:10], ensure_ascii=False),
+            }
+        )
+    return pd.DataFrame.from_records(detail_records)
+
+
+def build_pm_summary(feature_gap_overview: pd.DataFrame, target_brand: pd.Series) -> str:
+    brand_name = str(target_brand["brand_name"])
+    if feature_gap_overview.empty:
+        return f"# Feature Visibility Gaps\n\nNo feature gaps were generated for {brand_name}.\n"
+
+    lines = [f"# Feature Visibility Gaps", "", f"Brand: {brand_name}", ""]
+    current_feature = None
+    for _, row in feature_gap_overview.sort_values(["mapped_feature_name", "visibility_share"]).iterrows():
+        feature_name = str(row["mapped_feature_name"])
+        if feature_name != current_feature:
+            if current_feature is not None:
+                lines.append("")
+            lines.extend([f"## {feature_name}", "", "| Demand cluster | Visibility share | Signal | Top competitor |", "| --- | ---: | --- | --- |"])
+            current_feature = feature_name
+        lines.append(
+            f"| {row['cluster_label']} | {row['visibility_share'] * 100:.1f}% | {row['signal']} | {row['top_competitor_brand_name'] or '-'} |"
+        )
+    lines.append("")
+    return "\n".join(lines) + "\n"
+
+
 def join_ids(values: Iterable[object]) -> str:
     return ";".join(str(value) for value in values)
 
@@ -718,13 +946,20 @@ def write_outputs(
     rows: pd.DataFrame,
     coverage: pd.DataFrame,
     cluster_summary: pd.DataFrame,
+    feature_gap_overview: pd.DataFrame,
+    feature_gap_details: pd.DataFrame,
+    pm_summary: str,
     config: Config,
     brands: pd.DataFrame,
+    target_brand: pd.Series,
 ) -> None:
     timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     rows.to_csv(output_dir / "query_mapping.csv", index=False, quoting=csv.QUOTE_MINIMAL)
     coverage.to_csv(output_dir / "coverage_by_feature_cluster.csv", index=False)
     cluster_summary.to_csv(output_dir / "clusters.csv", index=False)
+    feature_gap_overview.to_csv(output_dir / "feature_gap_overview.csv", index=False)
+    feature_gap_details.to_csv(output_dir / "feature_gap_details.csv", index=False)
+    (output_dir / "feature_gap_summary.md").write_text(pm_summary, encoding="utf-8")
     metadata = {
         "generated_at": timestamp,
         "prompts_csv": str(config.prompts_csv),
@@ -732,6 +967,8 @@ def write_outputs(
         "brand": config.brand,
         "brands_csv": str(config.brands_csv) if config.brands_csv else None,
         "brand_count": len(brands),
+        "target_brand_id": str(target_brand["brand_id"]),
+        "target_brand_name": str(target_brand["brand_name"]),
         "embedding_backend": config.embedding_backend,
         "embedding_model": config.embedding_model,
         "normalizer": config.normalizer,
@@ -752,6 +989,8 @@ def print_summary(
     output_dir: Path,
     rows: pd.DataFrame,
     coverage: pd.DataFrame,
+    feature_gap_overview: pd.DataFrame,
+    target_brand: pd.Series,
     config: Config,
     brands: pd.DataFrame,
 ) -> None:
@@ -763,12 +1002,19 @@ def print_summary(
     print(f"Clusters: {rows['cluster_id'].nunique()}")
     print(f"Brand source: {config.brands_csv or config.brand!r}")
     print(f"Brand detector: {config.brand_detector}")
+    print(f"Target brand: {target_brand['brand_name']}")
     if coverage.empty:
         print("No feature/cluster coverage rows were produced.")
         return
     preview = coverage.head(10).to_string(index=False)
     print("\nCoverage preview:")
     print(preview)
+    if not feature_gap_overview.empty:
+        gap_preview = feature_gap_overview[
+            ["mapped_feature_name", "cluster_label", "visibility_share", "gap_severity", "top_competitor_brand_name"]
+        ].head(10).to_string(index=False)
+        print("\nFeature gap overview preview:")
+        print(gap_preview)
 
 
 if __name__ == "__main__":
