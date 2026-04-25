@@ -55,7 +55,44 @@ It produces:
 
 ## UI
 
-The repo includes a simple Streamlit UI:
+The primary demo UI is a React app:
+
+```text
+web/
+```
+
+Run the local API:
+
+```bash
+python3 -m uvicorn src.api_server:app --host 127.0.0.1 --port 8787
+```
+
+Run the React app:
+
+```bash
+cd web
+npm install
+npm run dev
+```
+
+Open:
+
+```text
+http://localhost:5173
+```
+
+The React UI supports:
+
+- sample run with built-in demo data
+- prompts CSV upload
+- brands CSV upload
+- features CSV or feature PDF upload
+- target-brand selection
+- mock vs real extraction/detection modes
+- ranked feature gap cards
+- detail panel with visibility, status, top competitor, top query, and examples
+
+The older Streamlit UI remains available as a fallback:
 
 ```text
 ui/app.py

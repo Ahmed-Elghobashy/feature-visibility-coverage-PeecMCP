@@ -3,6 +3,8 @@
 .peec_mcp_tokens.json
 __pycache__/
 *.pyc
+web/node_modules/
+web/dist/
 outputs/
 outputs_*/
 data/peec_chats.csv

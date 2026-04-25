@@ -1,0 +1,16 @@
+{
+  "scripts": {
+    "dev": "PATH=$HOME/.nvm/versions/node/v18.12.1/bin:$PATH vite --host 0.0.0.0",
+    "build": "PATH=$HOME/.nvm/versions/node/v18.12.1/bin:$PATH vite build",
+    "preview": "PATH=$HOME/.nvm/versions/node/v18.12.1/bin:$PATH vite preview --host 0.0.0.0"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^5.4.11",
+    "typescript": "^5.6.3",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "lucide-react": "^0.468.0"
+  },
+  "devDependencies": {}
+}

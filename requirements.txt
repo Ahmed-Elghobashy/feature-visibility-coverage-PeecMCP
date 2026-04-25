@@ -5,3 +5,5 @@ torch>=2.1
 mcp>=1.27
 pypdf>=5.0
 streamlit>=1.44
+starlette>=0.40
+uvicorn>=0.31
