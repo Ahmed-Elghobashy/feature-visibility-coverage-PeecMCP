@@ -154,6 +154,17 @@ p {
   border: 1px solid #dfd0fb;
 }
 
+.compact-fields {
+  display: grid;
+  gap: 2px;
+}
+
+.two-col {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
 .file-picker {
   display: grid;
   grid-template-columns: 38px minmax(0, 1fr);
@@ -307,6 +318,67 @@ p {
 
 .topbar h2 {
   font-size: 28px;
+}
+
+.top-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.top-input,
+.top-select {
+  min-width: min(360px, 62vw);
+  min-height: 42px;
+  border: 1px solid #d8c8f5;
+  border-radius: 8px;
+  padding: 0 12px;
+  color: #22172f;
+  background: #ffffff;
+  font-size: 24px;
+  font-weight: 800;
+}
+
+.top-input:focus,
+.top-select:focus {
+  border-color: #7c3aed;
+  outline: 3px solid rgba(124, 58, 237, 0.12);
+}
+
+.icon-button {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border: 1px solid #d8c8f5;
+  border-radius: 8px;
+  color: #5b21b6;
+  background: #ffffff;
+}
+
+.icon-button:hover {
+  background: #f6f0ff;
+  border-color: #a78bfa;
+}
+
+.settings-popover {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(150px, 1fr));
+  gap: 12px;
+  margin: -8px 0 18px;
+  padding: 14px;
+  border: 1px solid #e3d6fb;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 14px 30px rgba(88, 28, 135, 0.08);
+}
+
+.settings-popover .field {
+  margin-top: 0;
+}
+
+.settings-popover .notice {
+  grid-column: 1 / -1;
 }
 
 .eyebrow {
@@ -614,6 +686,23 @@ p {
   .section-heading {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .top-actions {
+    align-items: stretch;
+    flex-direction: column;
+    width: 100%;
+  }
+
+  .settings-popover,
+  .two-col {
+    grid-template-columns: 1fr;
+  }
+
+  .top-input,
+  .top-select {
+    min-width: 100%;
+    width: 100%;
   }
 
   .kpi-grid,

@@ -84,13 +84,26 @@ http://localhost:5173
 The React UI supports:
 
 - sample run with built-in demo data
-- prompts CSV upload
-- brands CSV upload
-- features CSV or feature PDF upload
+- Peec MCP mode for prompt/response data
+- CSV fallback mode for manual prompt/response data
+- one feature upload that accepts CSV or PDF
+- optional brands CSV override in Peec MCP mode
 - target-brand selection
-- mock vs real extraction/detection modes
+- mock vs real extraction/detection modes behind the settings button
 - ranked feature gap cards
 - detail panel with visibility, status, top competitor, top query, and examples
+
+In Peec MCP mode, prompts do not need to be uploaded. The UI sends project ID
+and date range to the local API, which exports tracked Peec chats and runs the
+coverage pipeline. Brands are derived from Peec chat mentions unless a brands CSV
+override is uploaded.
+
+Feature descriptions are always user-provided through the single feature upload:
+
+```text
+CSV -> used directly
+PDF -> extracted into feature_id,feature_name,description
+```
 
 The older Streamlit UI remains available as a fallback:
 

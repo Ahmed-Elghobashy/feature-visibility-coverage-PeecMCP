@@ -55,6 +55,12 @@ type BrandMode = "openai_mock" | "keyword" | "openai";
 
 const severityOrder: Record<string, number> = { high: 0, medium: 1, low: 2 };
 
+function isoDateDaysAgo(daysAgo: number) {
+  const date = new Date();
+  date.setDate(date.getDate() - daysAgo);
+  return date.toISOString().slice(0, 10);
+}
+
 function percent(value: number | string | undefined) {
   const parsed = Number(value ?? 0);
   if (!Number.isFinite(parsed)) return "0.0%";
@@ -208,9 +214,11 @@ function GapCard({ row, selected, onSelect }: { row: GapRow; selected: boolean; 
 function App() {
   const [promptsCsv, setPromptsCsv] = useState<File | null>(null);
   const [brandsCsv, setBrandsCsv] = useState<File | null>(null);
-  const [featuresCsv, setFeaturesCsv] = useState<File | null>(null);
-  const [featurePdf, setFeaturePdf] = useState<File | null>(null);
-  const [featureSource, setFeatureSource] = useState<"csv" | "pdf">("csv");
+  const [featureFile, setFeatureFile] = useState<File | null>(null);
+  const [dataSource, setDataSource] = useState<"peec" | "csv">("peec");
+  const [projectId, setProjectId] = useState("");
+  const [startDate, setStartDate] = useState(isoDateDaysAgo(7));
+  const [endDate, setEndDate] = useState(isoDateDaysAgo(0));
   const [targetBrand, setTargetBrand] = useState("Peec AI");
   const [normalizer, setNormalizer] = useState<Mode>("openai_mock");
   const [brandDetector, setBrandDetector] = useState<BrandMode>("openai_mock");
@@ -223,8 +231,9 @@ function App() {
   const [result, setResult] = useState<ApiResult | null>(null);
   const [error, setError] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
-  const [resultSource, setResultSource] = useState<"sample" | "upload" | null>(null);
+  const [resultSource, setResultSource] = useState<"sample" | "peec" | "csv" | null>(null);
   const [resultsMode, setResultsMode] = useState<"gaps" | "all">("all");
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const sortedOverview = useMemo(() => {
     const rows = [...(result?.overview ?? [])];
@@ -244,7 +253,9 @@ function App() {
   const featureCount = new Set(sortedOverview.map((row) => row.mapped_feature_name)).size;
   const visibleRows = resultsMode === "gaps" ? sortedOverview.filter((row) => row.is_feature_visibility_gap) : sortedOverview;
   const selected = visibleRows[Math.min(selectedIndex, Math.max(visibleRows.length - 1, 0))];
-  const uploadReady = Boolean(promptsCsv && brandsCsv && ((featureSource === "csv" && featuresCsv) || (featureSource === "pdf" && featurePdf)) && targetBrand);
+  const peecReady = Boolean(projectId && startDate && endDate && targetBrand && featureFile);
+  const csvReady = Boolean(promptsCsv && brandsCsv && targetBrand && featureFile);
+  const uploadReady = dataSource === "peec" ? peecReady : csvReady;
   const realModeSelected = normalizer === "openai" || brandDetector === "openai" || featureMode === "openai";
 
   useEffect(() => {
@@ -263,8 +274,7 @@ function App() {
 
   useEffect(() => {
     if (!brandsCsv) {
-      setBrandOptions(["Peec AI"]);
-      setTargetBrand("Peec AI");
+      setBrandOptions([]);
       return;
     }
     let cancelled = false;
@@ -280,7 +290,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [brandsCsv, targetBrand]);
+  }, [brandsCsv]);
 
   async function analyzeSample() {
     setLoading(true);
@@ -309,15 +319,22 @@ function App() {
     setError("");
     setSelectedIndex(0);
     try {
-      if (!promptsCsv || !brandsCsv) throw new Error("Prompts CSV and Brands CSV are required.");
-      if (featureSource === "csv" && !featuresCsv) throw new Error("Features CSV is required.");
-      if (featureSource === "pdf" && !featurePdf) throw new Error("Feature PDF is required.");
+      if (!featureFile) throw new Error("Feature CSV or PDF is required.");
 
       const form = new FormData();
-      form.append("prompts_csv", promptsCsv);
-      form.append("brands_csv", brandsCsv);
-      if (featureSource === "csv" && featuresCsv) form.append("features_csv", featuresCsv);
-      if (featureSource === "pdf" && featurePdf) form.append("feature_pdf", featurePdf);
+      let endpoint = "/api/analyze-peec";
+      if (dataSource === "csv") {
+        if (!promptsCsv || !brandsCsv) throw new Error("CSV fallback requires Prompts CSV and Brands CSV.");
+        form.append("prompts_csv", promptsCsv);
+        form.append("brands_csv", brandsCsv);
+        endpoint = "/api/analyze";
+      } else {
+        form.append("project_id", projectId);
+        form.append("start_date", startDate);
+        form.append("end_date", endDate);
+        if (brandsCsv) form.append("brands_csv", brandsCsv);
+      }
+      form.append("feature_file", featureFile);
       form.append("target_brand", targetBrand);
       form.append("normalizer", normalizer);
       form.append("brand_detector", brandDetector);
@@ -325,11 +342,11 @@ function App() {
       form.append("aggregation_mode", aggregationMode);
       form.append("feature_mode", featureMode);
 
-      const response = await fetch("/api/analyze", { method: "POST", body: form });
+      const response = await fetch(endpoint, { method: "POST", body: form });
       const data = (await response.json()) as ApiResult;
       if (!response.ok || !data.ok) throw new Error(data.error || data.stderr || "Analysis failed.");
       setResult(data);
-      setResultSource("upload");
+      setResultSource(dataSource);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Analysis failed.");
     } finally {
@@ -360,35 +377,36 @@ function App() {
             <Database size={16} />
             <h2>Inputs</h2>
           </div>
-          <FilePicker label="Prompts CSV" accept=".csv" file={promptsCsv} onChange={setPromptsCsv} />
-          <FilePicker label="Brands CSV" accept=".csv" file={brandsCsv} onChange={setBrandsCsv} />
           <div className="segment">
-            <button className={featureSource === "csv" ? "active" : ""} onClick={() => setFeatureSource("csv")}>CSV</button>
-            <button className={featureSource === "pdf" ? "active" : ""} onClick={() => setFeatureSource("pdf")}>PDF</button>
+            <button className={dataSource === "peec" ? "active" : ""} onClick={() => setDataSource("peec")}>Peec MCP</button>
+            <button className={dataSource === "csv" ? "active" : ""} onClick={() => setDataSource("csv")}>CSV fallback</button>
           </div>
-          {featureSource === "csv" ? (
-            <FilePicker label="Features CSV" accept=".csv" file={featuresCsv} onChange={setFeaturesCsv} />
+          {dataSource === "peec" ? (
+            <div className="compact-fields">
+              <label className="field">
+                <span>Peec project ID</span>
+                <input value={projectId} onChange={(event) => setProjectId(event.target.value)} />
+              </label>
+              <div className="two-col">
+                <label className="field">
+                  <span>Start date</span>
+                  <input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} />
+                </label>
+                <label className="field">
+                  <span>End date</span>
+                  <input type="date" value={endDate} onChange={(event) => setEndDate(event.target.value)} />
+                </label>
+              </div>
+            </div>
           ) : (
             <>
-              <FilePicker label="Feature PDF" accept=".pdf" file={featurePdf} onChange={setFeaturePdf} />
-              <SelectControl label="PDF extraction" value={featureMode} options={["mock", "openai"]} onChange={setFeatureMode} />
+              <FilePicker label="Prompts CSV" accept=".csv" file={promptsCsv} onChange={setPromptsCsv} />
+              <FilePicker label="Brands CSV" accept=".csv" file={brandsCsv} onChange={setBrandsCsv} />
             </>
           )}
-        </section>
-
-        <section className="panel">
-          <div className="panel-title">
-            <Settings2 size={16} />
-            <h2>Run settings</h2>
-          </div>
-          <SelectControl label="Target brand" value={targetBrand} options={brandOptions} onChange={setTargetBrand} />
-          <SelectControl label="Prompt normalizer" value={normalizer} options={["openai_mock", "heuristic", "openai"]} onChange={(value) => setNormalizer(value as Mode)} />
-          <SelectControl label="Brand detector" value={brandDetector} options={["openai_mock", "keyword", "openai"]} onChange={(value) => setBrandDetector(value as BrandMode)} />
-          <SelectControl label="Embeddings" value={embeddingBackend} options={["hash", "bge-m3"]} onChange={setEmbeddingBackend} />
-          <SelectControl label="Aggregation" value={aggregationMode} options={["response", "prompt", "prompt_model"]} onChange={setAggregationMode} />
-          {realModeSelected ? (
-            <div className="notice">Real LLM modes require `OPENAI_API_KEY` in the API server environment.</div>
-          ) : null}
+          <FilePicker label="Feature CSV or PDF" accept=".csv,.pdf" file={featureFile} onChange={setFeatureFile} />
+          {dataSource === "peec" ? <FilePicker label="Brands CSV override" accept=".csv" file={brandsCsv} onChange={setBrandsCsv} /> : null}
+          {dataSource === "peec" ? <div className="notice">Prompts and responses come from Peec MCP. Brand CSV is optional.</div> : null}
         </section>
 
         <div className="actions">
@@ -407,17 +425,39 @@ function App() {
         <header className="topbar">
           <div>
             <p className="eyebrow">Target brand</p>
-            <h2>{targetBrand || "Not selected"}</h2>
+            {brandOptions.length ? (
+              <select className="top-select" value={targetBrand} onChange={(event) => setTargetBrand(event.target.value)}>
+                {brandOptions.map((name) => <option key={name} value={name}>{name}</option>)}
+              </select>
+            ) : (
+              <input className="top-input" value={targetBrand} onChange={(event) => setTargetBrand(event.target.value)} />
+            )}
           </div>
-          <div className="status-pill">
-            {loading ? <Loader2 className="spin" size={16} /> : result?.ok ? <CheckCircle2 size={16} /> : <AlertCircle size={16} />}
-            {loading ? "Running analysis" : result?.ok ? `Analysis ready · ${resultSource}` : uploadReady ? "Ready to run" : "Waiting for inputs"}
+          <div className="top-actions">
+            <button className="icon-button" onClick={() => setSettingsOpen((value) => !value)} title="Run settings">
+              <Settings2 size={18} />
+            </button>
+            <div className="status-pill">
+              {loading ? <Loader2 className="spin" size={16} /> : result?.ok ? <CheckCircle2 size={16} /> : <AlertCircle size={16} />}
+              {loading ? "Running analysis" : result?.ok ? `Analysis ready · ${resultSource}` : uploadReady ? "Ready to run" : "Waiting for inputs"}
+            </div>
           </div>
         </header>
 
+        {settingsOpen ? (
+          <section className="settings-popover">
+            <SelectControl label="Prompt normalizer" value={normalizer} options={["openai_mock", "heuristic", "openai"]} onChange={(value) => setNormalizer(value as Mode)} />
+            <SelectControl label="Brand detector" value={brandDetector} options={["openai_mock", "keyword", "openai"]} onChange={(value) => setBrandDetector(value as BrandMode)} />
+            <SelectControl label="PDF extraction" value={featureMode} options={["mock", "openai"]} onChange={setFeatureMode} />
+            <SelectControl label="Embeddings" value={embeddingBackend} options={["hash", "bge-m3"]} onChange={setEmbeddingBackend} />
+            <SelectControl label="Aggregation" value={aggregationMode} options={["response", "prompt", "prompt_model"]} onChange={setAggregationMode} />
+            {realModeSelected ? <div className="notice">Real LLM modes require `OPENAI_API_KEY` in the API server environment.</div> : null}
+          </section>
+        ) : null}
+
         {error ? <div className="error-banner">{error}</div> : null}
         {!uploadReady && !result ? (
-          <div className="setup-banner">Upload prompts, brands, and features, or run the built-in sample.</div>
+          <div className="setup-banner">{dataSource === "peec" ? "Enter Peec project details and upload one feature CSV or PDF, or run the built-in sample." : "Upload prompts, brands, and one feature CSV or PDF, or run the built-in sample."}</div>
         ) : null}
 
         <section className="kpi-grid">
