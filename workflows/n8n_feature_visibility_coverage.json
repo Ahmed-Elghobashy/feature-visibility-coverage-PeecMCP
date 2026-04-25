@@ -1,0 +1,193 @@
+{
+  "name": "Feature Visibility Coverage - Peec MCP",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "manual-trigger",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "project_id",
+              "name": "project_id",
+              "type": "string",
+              "value": "or_60c9888d-75c4-4acd-957e-b80b5dcfda42"
+            },
+            {
+              "id": "start_date",
+              "name": "start_date",
+              "type": "string",
+              "value": "2026-04-22"
+            },
+            {
+              "id": "end_date",
+              "name": "end_date",
+              "type": "string",
+              "value": "2026-04-22"
+            },
+            {
+              "id": "features_csv",
+              "name": "features_csv",
+              "type": "string",
+              "value": "data/demo_features.csv"
+            },
+            {
+              "id": "brands_csv",
+              "name": "brands_csv",
+              "type": "string",
+              "value": "data/demo_brands.csv"
+            },
+            {
+              "id": "peec_chats_csv",
+              "name": "peec_chats_csv",
+              "type": "string",
+              "value": "data/peec_chats.csv"
+            },
+            {
+              "id": "output_dir",
+              "name": "output_dir",
+              "type": "string",
+              "value": "outputs_demo"
+            },
+            {
+              "id": "normalizer",
+              "name": "normalizer",
+              "type": "string",
+              "value": "heuristic"
+            },
+            {
+              "id": "brand_detector",
+              "name": "brand_detector",
+              "type": "string",
+              "value": "keyword"
+            },
+            {
+              "id": "cluster_threshold",
+              "name": "cluster_threshold",
+              "type": "string",
+              "value": "0.58"
+            },
+            {
+              "id": "python_bin",
+              "name": "python_bin",
+              "type": "string",
+              "value": "python3"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "set-config",
+      "name": "Set Run Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        480,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "command": "={{$json.python_bin}} src/peec_mcp_export.py --project-id {{$json.project_id}} --start-date {{$json.start_date}} --end-date {{$json.end_date}} --output {{$json.peec_chats_csv}} --connect-timeout 30"
+      },
+      "id": "export-peec-chats",
+      "name": "Export Peec Chats",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        740,
+        300
+      ],
+      "notes": "Requires Peec MCP OAuth token file on the n8n host: .peec_mcp_tokens.json. Run `python3 src/peec_mcp_export.py --list-projects` once locally to authorize."
+    },
+    {
+      "parameters": {
+        "command": "={{$json.python_bin}} src/visibility_mvp.py --prompts {{$json.peec_chats_csv}} --features {{$json.features_csv}} --brands {{$json.brands_csv}} --normalizer {{$json.normalizer}} --embedding-backend bge-m3 --brand-detector {{$json.brand_detector}} --cluster-threshold {{$json.cluster_threshold}} --output-dir {{$json.output_dir}}"
+      },
+      "id": "run-coverage",
+      "name": "Run Coverage",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        1000,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "command": "={{$json.python_bin}} -c \"import pandas as pd; c=pd.read_csv('{{$json.output_dir}}/coverage_by_feature_cluster.csv'); c=c[['brand_name','mapped_feature_name','cluster_label','prompt_count','brand_present_count','coverage_rate','coverage_status']].copy(); c['coverage_rate']=(c['coverage_rate']*100).round(1).astype(str)+'%'; print(c.head(20).to_string(index=False))\""
+      },
+      "id": "print-preview",
+      "name": "Print Coverage Preview",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        1260,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Set Run Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Run Config": {
+      "main": [
+        [
+          {
+            "node": "Export Peec Chats",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Export Peec Chats": {
+      "main": [
+        [
+          {
+            "node": "Run Coverage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Coverage": {
+      "main": [
+        [
+          {
+            "node": "Print Coverage Preview",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "pinData": {},
+  "versionId": "feature-visibility-coverage-mvp",
+  "triggerCount": 0,
+  "tags": []
+}

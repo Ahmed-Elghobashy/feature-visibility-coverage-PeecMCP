@@ -20,11 +20,17 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import csv
+import hashlib
 import json
 import os
 import re
+import secrets
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,9 +39,7 @@ from typing import Any, Iterable
 import pandas as pd
 
 from mcp import ClientSession
-from mcp.client.auth import OAuthClientProvider, TokenStorage
 from mcp.client.streamable_http import streamablehttp_client
-from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
 
 
 PEEC_MCP_URL = "https://api.peec.ai/mcp"
@@ -146,24 +150,11 @@ def parse_args() -> ExportConfig:
 
 async def export(config: ExportConfig) -> None:
     print(f"Connecting to Peec MCP at {config.server_url} ...", flush=True)
-    storage = JsonTokenStorage(config.token_path)
-    auth = OAuthClientProvider(
-        config.server_url,
-        client_metadata=OAuthClientMetadata(
-            redirect_uris=[f"http://{CALLBACK_HOST}:{CALLBACK_PORT}/callback"],
-            token_endpoint_auth_method="none",
-            client_name="Feature Visibility Coverage MVP",
-            software_id="feature-visibility-coverage-mvp",
-            software_version="0.1.0",
-        ),
-        storage=storage,
-        redirect_handler=redirect_handler,
-        callback_handler=manual_callback_handler,
-    )
+    access_token = await get_access_token(config)
 
     async with streamablehttp_client(
         config.server_url,
-        auth=auth,
+        headers={"Authorization": f"Bearer {access_token}"},
         timeout=config.connect_timeout,
         sse_read_timeout=300,
     ) as (
@@ -215,21 +206,129 @@ async def export(config: ExportConfig) -> None:
             print(f"Wrote {len(records)} Peec chat rows to {config.output}")
 
 
-async def redirect_handler(authorization_url: str) -> None:
+async def get_access_token(config: ExportConfig) -> str:
+    storage = JsonTokenStorage(config.token_path)
+    tokens = storage.get_tokens()
+    if tokens and tokens.get("access_token"):
+        return str(tokens["access_token"])
+
+    server_url = config.server_url.rstrip("/")
+    redirect_uri = f"http://{CALLBACK_HOST}:{CALLBACK_PORT}/callback"
+    client_info = storage.get_client_info()
+    if not client_info:
+        client_info = register_oauth_client(server_url, redirect_uri)
+        storage.set_client_info(client_info)
+
+    verifier = secrets.token_urlsafe(64)
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode("ascii")).digest()
+    ).decode("ascii").rstrip("=")
+    state = secrets.token_urlsafe(32)
+
     await ensure_callback_server()
+    authorization_url = (
+        f"{server_url}/authorize?"
+        + urllib.parse.urlencode(
+            {
+                "response_type": "code",
+                "client_id": client_info["client_id"],
+                "redirect_uri": redirect_uri,
+                "state": state,
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+                "resource": server_url,
+            }
+        )
+    )
+
     print("\nAuthorize Peec MCP in your browser:")
-    print(authorization_url)
+    print(authorization_url, flush=True)
     try:
         webbrowser.open(authorization_url)
     except Exception:
         pass
 
-
-async def manual_callback_handler() -> tuple[str, str | None]:
-    await ensure_callback_server()
     assert CALLBACK_FUTURE is not None
-    print(f"Waiting for OAuth callback on http://{CALLBACK_HOST}:{CALLBACK_PORT}/callback ...")
-    return await CALLBACK_FUTURE
+    print(f"Waiting for OAuth callback on {redirect_uri} ...", flush=True)
+    code, returned_state = await CALLBACK_FUTURE
+    if returned_state != state:
+        raise RuntimeError("OAuth state mismatch.")
+
+    tokens = exchange_oauth_token(
+        server_url=server_url,
+        client_id=client_info["client_id"],
+        code=code,
+        verifier=verifier,
+        redirect_uri=redirect_uri,
+    )
+    storage.set_tokens(tokens)
+    return str(tokens["access_token"])
+
+
+def register_oauth_client(server_url: str, redirect_uri: str) -> dict[str, Any]:
+    payload = {
+        "redirect_uris": [redirect_uri],
+        "token_endpoint_auth_method": "none",
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+        "client_name": "Feature Visibility Coverage MVP",
+        "software_id": "feature-visibility-coverage-mvp",
+        "software_version": "0.1.0",
+    }
+    response = post_json(f"{server_url}/register", payload)
+    if "client_id" not in response:
+        raise RuntimeError(f"OAuth registration response missing client_id: {response}")
+    return response
+
+
+def exchange_oauth_token(
+    *,
+    server_url: str,
+    client_id: str,
+    code: str,
+    verifier: str,
+    redirect_uri: str,
+) -> dict[str, Any]:
+    return post_form(
+        f"{server_url}/token",
+        {
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": redirect_uri,
+            "client_id": client_id,
+            "code_verifier": verifier,
+            "resource": server_url,
+        },
+    )
+
+
+def post_json(url: str, payload: dict[str, Any]) -> dict[str, Any]:
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    return read_json_response(request)
+
+
+def post_form(url: str, payload: dict[str, Any]) -> dict[str, Any]:
+    request = urllib.request.Request(
+        url,
+        data=urllib.parse.urlencode(payload).encode("utf-8"),
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    return read_json_response(request)
+
+
+def read_json_response(request: urllib.request.Request) -> dict[str, Any]:
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"HTTP {exc.code} from {request.full_url}: {body}") from exc
 
 
 async def ensure_callback_server() -> None:
@@ -257,23 +356,20 @@ async def handle_callback_connection(
             break
 
     target = request_line.decode("utf-8", errors="replace").split(" ")[1]
-    code_match = re.search(r"[?&]code=([^&]+)", target)
-    state_match = re.search(r"[?&]state=([^&]+)", target)
-    error_match = re.search(r"[?&]error=([^&]+)", target)
+    parsed = urllib.parse.urlparse(target)
+    query = urllib.parse.parse_qs(parsed.query)
+    code = query.get("code", [""])[0]
+    state = query.get("state", [None])[0]
+    error = query.get("error", [""])[0]
 
     if CALLBACK_FUTURE and not CALLBACK_FUTURE.done():
-        if code_match:
-            CALLBACK_FUTURE.set_result(
-                (
-                    code_match.group(1),
-                    state_match.group(1) if state_match else None,
-                )
-            )
+        if code:
+            CALLBACK_FUTURE.set_result((code, state))
             body = "Peec MCP authorization complete. You can return to the terminal."
             status = "200 OK"
         else:
             CALLBACK_FUTURE.set_exception(
-                RuntimeError(f"OAuth callback missing code: {error_match.group(1) if error_match else target}")
+                RuntimeError(f"OAuth callback missing code: {error or target}")
             )
             body = "Peec MCP authorization failed. You can return to the terminal."
             status = "400 Bad Request"
@@ -295,30 +391,26 @@ async def handle_callback_connection(
     await writer.wait_closed()
 
 
-class JsonTokenStorage(TokenStorage):
+class JsonTokenStorage:
     def __init__(self, path: Path) -> None:
         self.path = path
 
-    async def get_tokens(self) -> OAuthToken | None:
+    def get_tokens(self) -> dict[str, Any] | None:
         data = self._read()
-        if "tokens" not in data:
-            return None
-        return OAuthToken.model_validate(data["tokens"])
+        return data.get("tokens")
 
-    async def set_tokens(self, tokens: OAuthToken) -> None:
+    def set_tokens(self, tokens: dict[str, Any]) -> None:
         data = self._read()
-        data["tokens"] = tokens.model_dump(mode="json", exclude_none=True)
+        data["tokens"] = tokens
         self._write(data)
 
-    async def get_client_info(self) -> OAuthClientInformationFull | None:
+    def get_client_info(self) -> dict[str, Any] | None:
         data = self._read()
-        if "client_info" not in data:
-            return None
-        return OAuthClientInformationFull.model_validate(data["client_info"])
+        return data.get("client_info")
 
-    async def set_client_info(self, client_info: OAuthClientInformationFull) -> None:
+    def set_client_info(self, client_info: dict[str, Any]) -> None:
         data = self._read()
-        data["client_info"] = client_info.model_dump(mode="json", exclude_none=True)
+        data["client_info"] = client_info
         self._write(data)
 
     def _read(self) -> dict[str, Any]:

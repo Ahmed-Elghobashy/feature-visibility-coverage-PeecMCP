@@ -163,6 +163,38 @@ python3 src/visibility_mvp.py \
 
 The exporter uses the official Peec MCP server at `https://api.peec.ai/mcp` with Streamable HTTP and OAuth. OAuth tokens are stored locally in `.peec_mcp_tokens.json`, which is ignored by git.
 
+## n8n Workflow
+
+An importable n8n workflow is included:
+
+```text
+workflows/n8n_feature_visibility_coverage.json
+```
+
+Workflow steps:
+
+```text
+Manual Trigger
+  -> Set Run Config
+  -> Export Peec Chats
+  -> Run Coverage
+  -> Print Coverage Preview
+```
+
+Before running it in n8n:
+
+- install the Python requirements on the n8n host
+- run n8n with this repository as the working directory, or mount the repository into the n8n container
+- authorize Peec MCP once on the same host so `.peec_mcp_tokens.json` exists
+
+One-time Peec authorization:
+
+```bash
+python3 src/peec_mcp_export.py --list-projects
+```
+
+Import `workflows/n8n_feature_visibility_coverage.json` into n8n, then edit the `Set Run Config` node if you need a different project ID, date range, feature CSV, brand CSV, or output directory.
+
 ## Install
 
 The production embedding backend uses [`BAAI/bge-m3`](https://huggingface.co/BAAI/bge-m3) through `sentence-transformers`.

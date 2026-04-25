@@ -1,0 +1,6 @@
+feature_id,feature_name,description
+f1,AI Search Visibility Tracking,Tracks whether brands appear in AI-generated answers across ChatGPT Perplexity Gemini AI Overviews and other LLM search surfaces.
+f2,Brand Sentiment Analysis,Analyzes how AI responses describe a brand including positive neutral negative sentiment and positioning language.
+f3,Competitive Benchmarking,Compares brand visibility share of voice and positioning against competing AI search analytics and GEO platforms.
+f4,Citation And Source Monitoring,Monitors which URLs citations and source domains are used by AI answer engines when discussing a brand or category.
+f5,AI Search Strategy Optimization,Provides actionable insights for improving brand presence content strategy and performance in AI-driven search results.
