@@ -53,6 +53,52 @@ It produces:
 - `feature_gap_summary.md`: PM-facing summary view
 - `run_metadata.json`: versions and run configuration
 
+## UI
+
+The repo includes a simple Streamlit UI:
+
+```text
+ui/app.py
+```
+
+Run it locally:
+
+```bash
+streamlit run ui/app.py
+```
+
+The UI supports:
+
+- prompts CSV upload
+- brands CSV upload
+- features CSV upload
+- feature-description PDF upload
+- target-brand selection
+- mock vs real extraction/detection modes
+
+Feature descriptions can come from either:
+
+- `Features CSV`
+- `Feature PDF`
+
+If you upload a PDF, the app extracts feature rows into the same CSV shape the
+pipeline already expects:
+
+```text
+feature_id,feature_name,description
+```
+
+Feature extraction modes:
+
+- `mock`: deterministic heuristic extractor for fast iteration
+- `openai`: LLM extractor for turning product docs into feature rows
+
+The rest of the pipeline also keeps the same test/real split:
+
+- prompt normalizer: `openai_mock`, `heuristic`, `openai`
+- brand detector: `openai_mock`, `keyword`, `openai`
+- embeddings: `hash` for speed, `bge-m3` for higher fidelity
+
 ## MCP Server
 
 The repo includes an MCP wrapper:

@@ -69,6 +69,24 @@ Verification:
 - `run_visibility_coverage` completed through MCP and generated outputs in `/tmp/feature_visibility_mcp_test`
 - `summarize_feature_gaps` read those outputs back through MCP
 
+## UI Iteration
+
+Status: in progress on 2026-04-25.
+
+Current slice:
+
+- Streamlit UI added in `ui/app.py`
+- CSV upload flow for prompts, features, and brands
+- PDF upload flow for feature descriptions
+- feature extraction helper in `src/feature_extraction.py`
+- mock and OpenAI modes for feature extraction
+
+Planned next UI slices:
+
+- richer overview layout with chart bars instead of raw tables
+- clickable cluster-detail drilldown
+- direct Peec export trigger from the UI
+
 ## Notes
 
 - Peec MCP remains the raw data source.
