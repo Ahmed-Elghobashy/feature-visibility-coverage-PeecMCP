@@ -356,6 +356,10 @@ function App() {
 
   return (
     <main className="app-shell">
+      <button className="icon-button settings-trigger" onClick={() => setSettingsOpen((value) => !value)} title="Run settings">
+        <Settings2 size={18} />
+      </button>
+
       <aside className="sidebar">
         <div className="brand-lockup">
           <div className="mark">
@@ -434,9 +438,6 @@ function App() {
             )}
           </div>
           <div className="top-actions">
-            <button className="icon-button" onClick={() => setSettingsOpen((value) => !value)} title="Run settings">
-              <Settings2 size={18} />
-            </button>
             <div className="status-pill">
               {loading ? <Loader2 className="spin" size={16} /> : result?.ok ? <CheckCircle2 size={16} /> : <AlertCircle size={16} />}
               {loading ? "Running analysis" : result?.ok ? `Analysis ready · ${resultSource}` : uploadReady ? "Ready to run" : "Waiting for inputs"}

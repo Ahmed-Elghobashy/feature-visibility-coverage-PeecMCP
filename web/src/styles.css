@@ -29,6 +29,7 @@ button {
 }
 
 .app-shell {
+  position: relative;
   display: grid;
   grid-template-columns: 360px minmax(0, 1fr);
   min-height: 100vh;
@@ -361,11 +362,24 @@ p {
   border-color: #a78bfa;
 }
 
+.settings-trigger {
+  position: fixed;
+  top: 18px;
+  right: 22px;
+  z-index: 30;
+  box-shadow: 0 10px 24px rgba(88, 28, 135, 0.12);
+}
+
 .settings-popover {
+  position: fixed;
+  top: 72px;
+  right: 22px;
+  z-index: 29;
+  width: min(980px, calc(100vw - 44px));
   display: grid;
   grid-template-columns: repeat(5, minmax(150px, 1fr));
   gap: 12px;
-  margin: -8px 0 18px;
+  margin: 0;
   padding: 14px;
   border: 1px solid #e3d6fb;
   border-radius: 8px;
@@ -694,7 +708,13 @@ p {
     width: 100%;
   }
 
-  .settings-popover,
+  .settings-popover {
+    top: 66px;
+    right: 16px;
+    width: calc(100vw - 32px);
+    grid-template-columns: 1fr;
+  }
+
   .two-col {
     grid-template-columns: 1fr;
   }
