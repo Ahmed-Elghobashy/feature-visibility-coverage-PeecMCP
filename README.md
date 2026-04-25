@@ -53,6 +53,55 @@ It produces:
 - `feature_gap_summary.md`: PM-facing summary view
 - `run_metadata.json`: versions and run configuration
 
+## MCP Server
+
+The repo includes an MCP wrapper:
+
+```text
+src/feature_visibility_mcp.py
+```
+
+Tools:
+
+- `validate_csv_inputs`
+- `run_visibility_coverage`
+- `summarize_feature_gaps`
+- `export_peec_chats`
+
+Run it over stdio:
+
+```bash
+python3 src/feature_visibility_mcp.py
+```
+
+Example client config:
+
+```json
+{
+  "mcpServers": {
+    "feature-visibility": {
+      "command": "python3",
+      "args": ["src/feature_visibility_mcp.py"]
+    }
+  }
+}
+```
+
+The MCP server is a thin wrapper over the existing scripts. It does not replace
+the CLI paths; it exposes them as tools.
+
+For fast iteration, `run_visibility_coverage` defaults to:
+
+- `embedding_backend=hash`
+- `normalizer=openai_mock`
+- `brand_detector=openai_mock`
+
+For higher-fidelity runs, switch to:
+
+- `embedding_backend=bge-m3`
+- `normalizer=openai` or `heuristic`
+- `brand_detector=openai` or `keyword`
+
 ## Example
 
 Sample prompts input:

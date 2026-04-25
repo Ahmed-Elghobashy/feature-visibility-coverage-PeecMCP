@@ -49,6 +49,26 @@ Packaging and tool surface:
 - mock/test modes where external model calls would otherwise slow iteration
 - improved README and operating docs
 
+Status: completed on 2026-04-25.
+
+Delivered:
+
+- MCP server wrapper in `src/feature_visibility_mcp.py`
+- MCP tools:
+  - `validate_csv_inputs`
+  - `run_visibility_coverage`
+  - `summarize_feature_gaps`
+  - `export_peec_chats`
+- documented MCP server setup and client config in the README
+- retained fast mock defaults for iterative development through the MCP tool
+
+Verification:
+
+- stdio MCP client listed all tools successfully
+- `validate_csv_inputs` returned the expected CSV contract on sample inputs
+- `run_visibility_coverage` completed through MCP and generated outputs in `/tmp/feature_visibility_mcp_test`
+- `summarize_feature_gaps` read those outputs back through MCP
+
 ## Notes
 
 - Peec MCP remains the raw data source.
