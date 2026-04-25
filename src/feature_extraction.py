@@ -68,9 +68,11 @@ def normalize_text(text: str) -> str:
 
 
 def extract_features_mock(text: str) -> pd.DataFrame:
-    sections = split_candidate_sections(text)
     records: list[dict[str, str]] = []
     seen: set[str] = set()
+    sections = split_heading_sections(text)
+    if not sections:
+        sections = split_candidate_sections(text)
     for section in sections:
         name, description = parse_section_mock(section)
         if not name or not description:
@@ -87,6 +89,22 @@ def extract_features_mock(text: str) -> pd.DataFrame:
             }
         )
     return pd.DataFrame.from_records(records or [], columns=["feature_id", "feature_name", "description"])
+
+
+def split_heading_sections(text: str) -> list[str]:
+    pattern = re.compile(r"(?P<name>[A-Z][A-Za-z0-9&/\- ]{2,80}):")
+    matches = list(pattern.finditer(text))
+    if len(matches) < 2:
+        return []
+
+    sections: list[str] = []
+    for idx, match in enumerate(matches):
+        start = match.start()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+        block = text[start:end].strip()
+        if block:
+            sections.append(block)
+    return sections
 
 
 def split_candidate_sections(text: str) -> list[str]:

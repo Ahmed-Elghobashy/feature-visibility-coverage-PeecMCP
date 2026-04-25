@@ -93,6 +93,12 @@ Feature extraction modes:
 - `mock`: deterministic heuristic extractor for fast iteration
 - `openai`: LLM extractor for turning product docs into feature rows
 
+Sample PDF for the upload flow:
+
+```text
+data/sample_feature_brief.pdf
+```
+
 The rest of the pipeline also keeps the same test/real split:
 
 - prompt normalizer: `openai_mock`, `heuristic`, `openai`

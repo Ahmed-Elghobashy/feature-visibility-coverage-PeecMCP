@@ -8,3 +8,4 @@ outputs_*/
 data/peec_chats.csv
 *.pdf
 *.docx
+!data/sample_feature_brief.pdf
