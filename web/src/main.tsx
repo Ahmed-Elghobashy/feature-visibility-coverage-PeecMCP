@@ -1,4 +1,4 @@
-import React, { ChangeEvent, useMemo, useState } from "react";
+import React, { ChangeEvent, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   AlertCircle,
@@ -60,6 +60,44 @@ function percent(value: number | string | undefined) {
 
 function fileLabel(file: File | null, fallback: string) {
   return file ? file.name : fallback;
+}
+
+function parseCsvLine(line: string) {
+  const values: string[] = [];
+  let current = "";
+  let quoted = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    if (char === '"' && line[index + 1] === '"') {
+      current += '"';
+      index += 1;
+    } else if (char === '"') {
+      quoted = !quoted;
+    } else if (char === "," && !quoted) {
+      values.push(current.trim());
+      current = "";
+    } else {
+      current += char;
+    }
+  }
+  values.push(current.trim());
+  return values;
+}
+
+function extractBrandNames(csvText: string) {
+  const lines = csvText.split(/\r?\n/).filter((line) => line.trim());
+  if (lines.length < 2) return [];
+  const headers = parseCsvLine(lines[0]).map((header) => header.replace(/^"|"$/g, "").trim().toLowerCase());
+  const brandIndex = ["brand_name", "brand", "name"].map((name) => headers.indexOf(name)).find((index) => index >= 0);
+  if (brandIndex === undefined) return [];
+  return Array.from(
+    new Set(
+      lines
+        .slice(1)
+        .map((line) => parseCsvLine(line)[brandIndex]?.replace(/^"|"$/g, "").trim())
+        .filter(Boolean),
+    ),
+  );
 }
 
 function CsvDownload({ rows, filename }: { rows: Record<string, unknown>[]; filename: string }) {
@@ -170,6 +208,7 @@ function App() {
   const [embeddingBackend, setEmbeddingBackend] = useState("hash");
   const [aggregationMode, setAggregationMode] = useState("prompt");
   const [featureMode, setFeatureMode] = useState("mock");
+  const [brandOptions, setBrandOptions] = useState<string[]>(["Peec AI"]);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<ApiResult | null>(null);
   const [error, setError] = useState("");
@@ -192,6 +231,27 @@ function App() {
     ? sortedOverview.reduce((sum, row) => sum + Number(row.visibility_share || 0), 0) / sortedOverview.length
     : 0;
   const featureCount = new Set(sortedOverview.map((row) => row.mapped_feature_name)).size;
+
+  useEffect(() => {
+    if (!brandsCsv) {
+      setBrandOptions(["Peec AI"]);
+      setTargetBrand("Peec AI");
+      return;
+    }
+    let cancelled = false;
+    brandsCsv.text().then((text) => {
+      if (cancelled) return;
+      const names = extractBrandNames(text);
+      if (!names.length) return;
+      setBrandOptions(names);
+      if (!names.includes(targetBrand)) {
+        setTargetBrand(names[0]);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [brandsCsv, targetBrand]);
 
   async function analyzeSample() {
     setLoading(true);
@@ -278,10 +338,7 @@ function App() {
 
         <section className="panel">
           <h2>Run settings</h2>
-          <label className="field">
-            <span>Target brand</span>
-            <input value={targetBrand} onChange={(event) => setTargetBrand(event.target.value)} />
-          </label>
+          <SelectControl label="Target brand" value={targetBrand} options={brandOptions} onChange={setTargetBrand} />
           <SelectControl label="Prompt normalizer" value={normalizer} options={["openai_mock", "heuristic", "openai"]} onChange={(value) => setNormalizer(value as Mode)} />
           <SelectControl label="Brand detector" value={brandDetector} options={["openai_mock", "keyword", "openai"]} onChange={(value) => setBrandDetector(value as BrandMode)} />
           <SelectControl label="Embeddings" value={embeddingBackend} options={["hash", "bge-m3"]} onChange={setEmbeddingBackend} />

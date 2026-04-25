@@ -111,13 +111,28 @@ async def save_upload(upload: UploadFile, path: Path) -> Path:
 
 
 def first_brand_name(brands_csv: Path) -> str:
+    names = brand_names(brands_csv)
+    if names:
+        return names[0]
+    raise ValueError("Brands CSV did not contain a usable brand name.")
+
+
+def brand_names(brands_csv: Path) -> list[str]:
+    names: list[str] = []
     with brands_csv.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
         for row in reader:
             value = row.get("brand_name") or row.get("brand") or row.get("name")
             if value:
-                return value
-    raise ValueError("Brands CSV did not contain a usable brand name.")
+                names.append(value)
+    return names
+
+
+def validate_target_brand(target_brand: str, brands_csv: Path) -> str | None:
+    available = brand_names(brands_csv)
+    if target_brand in available:
+        return None
+    return f"Target brand {target_brand!r} was not found in brands CSV. Available brands: {', '.join(available) or '(none)'}."
 
 
 async def health(_request) -> JSONResponse:
@@ -177,6 +192,9 @@ async def analyze_upload(request) -> JSONResponse:
             extracted_features = json.loads(frame.to_json(orient="records"))
 
         target_brand = str(form.get("target_brand") or first_brand_name(brands_path))
+        target_error = validate_target_brand(target_brand, brands_path)
+        if target_error:
+            return JSONResponse({"ok": False, "error": target_error}, status_code=400)
         result = run_pipeline(
             prompts_csv=prompts_path,
             features_csv=features_path,
