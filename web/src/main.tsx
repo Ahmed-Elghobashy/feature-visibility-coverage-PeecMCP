@@ -4,10 +4,13 @@ import {
   AlertCircle,
   BarChart3,
   CheckCircle2,
+  Database,
   Download,
   FileText,
   Loader2,
   Play,
+  Server,
+  Settings2,
   Upload,
 } from "lucide-react";
 import "./styles.css";
@@ -60,6 +63,12 @@ function percent(value: number | string | undefined) {
 
 function fileLabel(file: File | null, fallback: string) {
   return file ? file.name : fallback;
+}
+
+function formatBytes(size: number) {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function parseCsvLine(line: string) {
@@ -141,7 +150,7 @@ function FilePicker({
       </span>
       <span>
         <strong>{label}</strong>
-        <small>{fileLabel(file, "Choose file")}</small>
+        <small>{file ? `${fileLabel(file, "Choose file")} · ${formatBytes(file.size)}` : "Choose file"}</small>
       </span>
     </label>
   );
@@ -209,10 +218,13 @@ function App() {
   const [aggregationMode, setAggregationMode] = useState("prompt");
   const [featureMode, setFeatureMode] = useState("mock");
   const [brandOptions, setBrandOptions] = useState<string[]>(["Peec AI"]);
+  const [apiOnline, setApiOnline] = useState<boolean | null>(null);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<ApiResult | null>(null);
   const [error, setError] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const [resultSource, setResultSource] = useState<"sample" | "upload" | null>(null);
+  const [resultsMode, setResultsMode] = useState<"gaps" | "all">("all");
 
   const sortedOverview = useMemo(() => {
     const rows = [...(result?.overview ?? [])];
@@ -225,12 +237,29 @@ function App() {
     });
   }, [result]);
 
-  const selected = sortedOverview[Math.min(selectedIndex, Math.max(sortedOverview.length - 1, 0))];
   const strictGapCount = sortedOverview.filter((row) => row.is_feature_visibility_gap).length;
   const avgVisibility = sortedOverview.length
     ? sortedOverview.reduce((sum, row) => sum + Number(row.visibility_share || 0), 0) / sortedOverview.length
     : 0;
   const featureCount = new Set(sortedOverview.map((row) => row.mapped_feature_name)).size;
+  const visibleRows = resultsMode === "gaps" ? sortedOverview.filter((row) => row.is_feature_visibility_gap) : sortedOverview;
+  const selected = visibleRows[Math.min(selectedIndex, Math.max(visibleRows.length - 1, 0))];
+  const uploadReady = Boolean(promptsCsv && brandsCsv && ((featureSource === "csv" && featuresCsv) || (featureSource === "pdf" && featurePdf)) && targetBrand);
+  const realModeSelected = normalizer === "openai" || brandDetector === "openai" || featureMode === "openai";
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/health")
+      .then((response) => {
+        if (!cancelled) setApiOnline(response.ok);
+      })
+      .catch(() => {
+        if (!cancelled) setApiOnline(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (!brandsCsv) {
@@ -257,15 +286,17 @@ function App() {
     setLoading(true);
     setError("");
     setSelectedIndex(0);
+    setTargetBrand("Peec AI");
     try {
       const response = await fetch("/api/analyze-sample", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ target_brand: targetBrand, normalizer, brand_detector: brandDetector, embedding_backend: embeddingBackend, aggregation_mode: aggregationMode }),
+        body: JSON.stringify({ target_brand: "Peec AI", normalizer, brand_detector: brandDetector, embedding_backend: embeddingBackend, aggregation_mode: aggregationMode }),
       });
       const data = (await response.json()) as ApiResult;
       if (!response.ok || !data.ok) throw new Error(data.error || data.stderr || "Sample analysis failed.");
       setResult(data);
+      setResultSource("sample");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Sample analysis failed.");
     } finally {
@@ -298,6 +329,7 @@ function App() {
       const data = (await response.json()) as ApiResult;
       if (!response.ok || !data.ok) throw new Error(data.error || data.stderr || "Analysis failed.");
       setResult(data);
+      setResultSource("upload");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Analysis failed.");
     } finally {
@@ -318,8 +350,16 @@ function App() {
           </div>
         </div>
 
+        <div className={`service-card ${apiOnline ? "online" : apiOnline === false ? "offline" : ""}`}>
+          <Server size={17} />
+          <span>{apiOnline === null ? "Checking API" : apiOnline ? "API connected" : "API unavailable"}</span>
+        </div>
+
         <section className="panel">
-          <h2>Inputs</h2>
+          <div className="panel-title">
+            <Database size={16} />
+            <h2>Inputs</h2>
+          </div>
           <FilePicker label="Prompts CSV" accept=".csv" file={promptsCsv} onChange={setPromptsCsv} />
           <FilePicker label="Brands CSV" accept=".csv" file={brandsCsv} onChange={setBrandsCsv} />
           <div className="segment">
@@ -337,20 +377,26 @@ function App() {
         </section>
 
         <section className="panel">
-          <h2>Run settings</h2>
+          <div className="panel-title">
+            <Settings2 size={16} />
+            <h2>Run settings</h2>
+          </div>
           <SelectControl label="Target brand" value={targetBrand} options={brandOptions} onChange={setTargetBrand} />
           <SelectControl label="Prompt normalizer" value={normalizer} options={["openai_mock", "heuristic", "openai"]} onChange={(value) => setNormalizer(value as Mode)} />
           <SelectControl label="Brand detector" value={brandDetector} options={["openai_mock", "keyword", "openai"]} onChange={(value) => setBrandDetector(value as BrandMode)} />
           <SelectControl label="Embeddings" value={embeddingBackend} options={["hash", "bge-m3"]} onChange={setEmbeddingBackend} />
           <SelectControl label="Aggregation" value={aggregationMode} options={["response", "prompt", "prompt_model"]} onChange={setAggregationMode} />
+          {realModeSelected ? (
+            <div className="notice">Real LLM modes require `OPENAI_API_KEY` in the API server environment.</div>
+          ) : null}
         </section>
 
         <div className="actions">
-          <button className="button button-primary" onClick={analyzeUpload} disabled={loading}>
+          <button className="button button-primary" onClick={analyzeUpload} disabled={loading || !uploadReady || apiOnline === false}>
             {loading ? <Loader2 className="spin" size={17} /> : <Play size={17} />}
             Run analysis
           </button>
-          <button className="button button-secondary" onClick={analyzeSample} disabled={loading}>
+          <button className="button button-secondary" onClick={analyzeSample} disabled={loading || apiOnline === false}>
             <FileText size={17} />
             Load sample
           </button>
@@ -364,12 +410,15 @@ function App() {
             <h2>{targetBrand || "Not selected"}</h2>
           </div>
           <div className="status-pill">
-            {result?.ok ? <CheckCircle2 size={16} /> : <AlertCircle size={16} />}
-            {result?.ok ? "Analysis ready" : "Waiting for run"}
+            {loading ? <Loader2 className="spin" size={16} /> : result?.ok ? <CheckCircle2 size={16} /> : <AlertCircle size={16} />}
+            {loading ? "Running analysis" : result?.ok ? `Analysis ready · ${resultSource}` : uploadReady ? "Ready to run" : "Waiting for inputs"}
           </div>
         </header>
 
         {error ? <div className="error-banner">{error}</div> : null}
+        {!uploadReady && !result ? (
+          <div className="setup-banner">Upload prompts, brands, and features, or run the built-in sample.</div>
+        ) : null}
 
         <section className="kpi-grid">
           <div className="kpi"><span>Strict gaps</span><strong>{strictGapCount}</strong></div>
@@ -381,19 +430,28 @@ function App() {
         <div className="content-grid">
           <section className="results-column">
             <div className="section-heading">
-              <h2>Ranked gaps</h2>
-              <CsvDownload rows={sortedOverview as unknown as Record<string, unknown>[]} filename="feature_gap_overview.csv" />
+              <div>
+                <h2>Ranked gaps</h2>
+                <p>{visibleRows.length} visible rows</p>
+              </div>
+              <div className="toolbar">
+                <div className="mini-segment">
+                  <button className={resultsMode === "all" ? "active" : ""} onClick={() => setResultsMode("all")}>All</button>
+                  <button className={resultsMode === "gaps" ? "active" : ""} onClick={() => setResultsMode("gaps")}>Strict gaps</button>
+                </div>
+                <CsvDownload rows={sortedOverview as unknown as Record<string, unknown>[]} filename="feature_gap_overview.csv" />
+              </div>
             </div>
             {loading ? (
               <div className="empty-state"><Loader2 className="spin" size={28} />Running analysis</div>
-            ) : sortedOverview.length ? (
+            ) : visibleRows.length ? (
               <div className="gap-list">
-                {sortedOverview.map((row, index) => (
+                {visibleRows.map((row, index) => (
                   <GapCard key={`${row.mapped_feature_name}-${row.cluster_label}-${index}`} row={row} selected={index === selectedIndex} onSelect={() => setSelectedIndex(index)} />
                 ))}
               </div>
             ) : (
-              <div className="empty-state">Run a sample or upload files to see feature visibility gaps.</div>
+              <div className="empty-state">{result ? "No rows match the current filter." : "Run a sample or upload files to see feature visibility gaps."}</div>
             )}
           </section>
 
