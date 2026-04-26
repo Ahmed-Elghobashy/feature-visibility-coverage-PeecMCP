@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+import httpx
 import pandas as pd
 
 from mcp import ClientSession
@@ -148,8 +149,21 @@ def parse_args() -> ExportConfig:
 
 async def export(config: ExportConfig) -> None:
     print(f"Connecting to Peec MCP at {config.server_url} ...", flush=True)
-    access_token = await get_access_token(config)
+    storage = JsonTokenStorage(config.token_path)
+    for attempt in range(2):
+        access_token = await get_access_token(config, force_reauth=attempt > 0)
+        try:
+            await export_with_token(config, access_token)
+            return
+        except BaseException as exc:
+            if attempt == 0 and has_http_status(exc, 401):
+                print("Stored Peec token was rejected. Reauthorizing ...", flush=True)
+                storage.clear_tokens()
+                continue
+            raise
 
+
+async def export_with_token(config: ExportConfig, access_token: str) -> None:
     async with streamablehttp_client(
         config.server_url,
         headers={"Authorization": f"Bearer {access_token}"},
@@ -204,9 +218,9 @@ async def export(config: ExportConfig) -> None:
             print(f"Wrote {len(records)} Peec chat rows to {config.output}")
 
 
-async def get_access_token(config: ExportConfig) -> str:
+async def get_access_token(config: ExportConfig, force_reauth: bool = False) -> str:
     storage = JsonTokenStorage(config.token_path)
-    tokens = storage.get_tokens()
+    tokens = None if force_reauth else storage.get_tokens()
     if tokens and tokens.get("access_token"):
         return str(tokens["access_token"])
 
@@ -400,6 +414,11 @@ class JsonTokenStorage:
     def set_tokens(self, tokens: dict[str, Any]) -> None:
         data = self._read()
         data["tokens"] = tokens
+        self._write(data)
+
+    def clear_tokens(self) -> None:
+        data = self._read()
+        data.pop("tokens", None)
         self._write(data)
 
     def get_client_info(self) -> dict[str, Any] | None:
@@ -618,6 +637,30 @@ def stringify_content(message: dict[str, Any]) -> str:
     return json.dumps(content, ensure_ascii=False)
 
 
+def iter_exceptions(exc: BaseException) -> Iterable[BaseException]:
+    if isinstance(exc, BaseExceptionGroup):
+        for child in exc.exceptions:
+            yield from iter_exceptions(child)
+        return
+    yield exc
+
+
+def has_http_status(exc: BaseException, status_code: int) -> bool:
+    for item in iter_exceptions(exc):
+        if isinstance(item, httpx.HTTPStatusError) and item.response.status_code == status_code:
+            return True
+    return False
+
+
+def format_error(exc: BaseException) -> str:
+    for item in iter_exceptions(exc):
+        if isinstance(item, httpx.HTTPStatusError):
+            if item.response.status_code == 401:
+                return "Peec MCP returned 401 Unauthorized. Reconnect your Peec OAuth session and try again."
+            return f"Peec MCP HTTP error {item.response.status_code}: {item}"
+    return str(exc)
+
+
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
@@ -625,5 +668,5 @@ if __name__ == "__main__":
         print("Interrupted.", file=sys.stderr)
         raise SystemExit(130)
     except Exception as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        print(f"error: {format_error(exc)}", file=sys.stderr)
         raise SystemExit(1)
