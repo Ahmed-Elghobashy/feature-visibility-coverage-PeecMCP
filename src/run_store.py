@@ -246,6 +246,10 @@ def load_run_mappings(
             "mapped_feature_id",
             "mapped_feature_name",
             "feature_similarity",
+            "feature_present",
+            "feature_evidence_strength",
+            "source_domains",
+            "engine",
             "brand_present",
             "brand_detection_source",
         ]
@@ -296,6 +300,8 @@ def reaggregate_saved_run(run_id_value: str, aggregation_mode: str) -> dict[str,
         normalizer_model=str(metadata.get("normalizer_model", "gpt-4.1-mini")),
         brand_detector=str(metadata.get("brand_detector", "openai_mock")),
         brand_detector_model=str(metadata.get("brand_detector_model", "gpt-4.1-mini")),
+        feature_evidence_mode=str(metadata.get("feature_evidence_mode", "openai_mock")),
+        feature_evidence_model=str(metadata.get("feature_evidence_model", "gpt-4.1-mini")),
         cluster_threshold=float(metadata.get("cluster_threshold", 0.2)),
         feature_threshold=float(metadata.get("feature_threshold", 0.05)),
         min_cluster_size=int(metadata.get("min_cluster_size", 2)),
@@ -306,8 +312,8 @@ def reaggregate_saved_run(run_id_value: str, aggregation_mode: str) -> dict[str,
     coverage = build_coverage(brand_rows, config.min_coverage_n, aggregation_mode)
     cluster_summary = build_cluster_summary(prompts)
     target_brand = resolve_target_brand(brands, config)
-    feature_gap_overview = build_feature_gap_overview(coverage, prompts, target_brand)
-    feature_gap_details = build_feature_gap_details(coverage, prompts, target_brand)
+    feature_gap_overview = build_feature_gap_overview(coverage, brand_rows, target_brand)
+    feature_gap_details = build_feature_gap_details(coverage, brand_rows, target_brand)
     pm_summary = build_pm_summary(feature_gap_overview, target_brand)
 
     output_dir = config.output_dir

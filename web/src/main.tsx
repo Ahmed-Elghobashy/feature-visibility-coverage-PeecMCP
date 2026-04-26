@@ -1,4 +1,4 @@
-import React, { ChangeEvent, useEffect, useMemo, useState } from "react";
+import React, { CSSProperties, ChangeEvent, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   AlertCircle,
@@ -10,17 +10,20 @@ import {
   Loader2,
   Play,
   Server,
-  Settings2,
   Upload,
 } from "lucide-react";
 import "./styles.css";
 
 type GapRow = {
+  mapped_feature_id?: string;
   mapped_feature_name: string;
+  cluster_id?: string;
   cluster_label: string;
   visibility_share: number;
   consistency_band: string;
   target_visibility_status: string;
+  target_feature_present_count?: number;
+  target_feature_visible_count?: number;
   competitor_present: boolean;
   is_feature_visibility_gap: boolean;
   gap_category: string;
@@ -32,6 +35,9 @@ type GapRow = {
   top_competitor_visibility_share: number;
   top_query: string;
   example_queries: string;
+  model_breakdown?: string;
+  model_visibility_breakdown?: string;
+  top_source_domains?: string;
   present_prompt_ids: string;
   missing_prompt_ids: string;
 };
@@ -66,11 +72,15 @@ type MappingRow = {
   prompt_id: string;
   original_prompt?: string;
   canonical_query?: string;
+  engine?: string;
   cluster_id?: string;
   cluster_label?: string;
   mapped_feature_id?: string;
   mapped_feature_name?: string;
   feature_similarity?: number;
+  feature_present?: boolean;
+  feature_evidence_strength?: number;
+  source_domains?: string;
   brand_present?: boolean;
 };
 
@@ -99,13 +109,132 @@ type RunLogEntry = {
 
 type Mode = "openai_mock" | "heuristic" | "openai";
 type BrandMode = "openai_mock" | "keyword" | "openai";
+type FeatureEvidenceMode = "openai_mock" | "keyword" | "openai";
+type AppView = "setup" | "results";
+type ResultsTab = "dashboard" | "history" | "features";
 
 const severityOrder: Record<string, number> = { high: 0, medium: 1, low: 2 };
+const clusterPalette = [
+  { accent: "#9eb0cb", soft: "#f4f7fc", border: "#d8e0ee" },
+  { accent: "#a8b8d2", soft: "#f5f8fd", border: "#dbe3f0" },
+  { accent: "#93abc9", soft: "#f2f7fc", border: "#d3dfed" },
+  { accent: "#b2bdd0", soft: "#f6f8fb", border: "#dfe5ed" },
+  { accent: "#8ea4c0", soft: "#f2f6fb", border: "#d0dae7" },
+  { accent: "#a6b6cc", soft: "#f5f8fc", border: "#d9e1eb" },
+];
 
 function isoDateDaysAgo(daysAgo: number) {
   const date = new Date();
   date.setDate(date.getDate() - daysAgo);
   return date.toISOString().slice(0, 10);
+}
+
+function formatRunDate(isoValue: string) {
+  const date = new Date(isoValue);
+  if (Number.isNaN(date.getTime())) return isoValue;
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function formatRunLabel(run: RunSummary) {
+  return `${run.target_brand} · ${formatRunDate(run.created_at)} · ${run.aggregation_mode}`;
+}
+
+function hashKey(value: string) {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash * 31 + value.charCodeAt(index)) >>> 0;
+  }
+  return hash;
+}
+
+function featureAccentStyle(featureKey: string | undefined, selected = false): CSSProperties {
+  const key = featureKey || "default-feature";
+  const palette = clusterPalette[hashKey(key) % clusterPalette.length];
+  return {
+    "--cluster-accent": palette.accent,
+    "--cluster-soft": palette.soft,
+    "--cluster-border": palette.border,
+    "--cluster-shadow": selected ? `${palette.accent}22` : `${palette.accent}14`,
+  } as CSSProperties;
+}
+
+type BreakdownItem = {
+  label: string;
+  value: number;
+  displayValue: string;
+};
+
+function parseBreakdown(metric: string | undefined) {
+  if (!metric) return [] as BreakdownItem[];
+  return metric
+    .split(";")
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      const parts = entry.split(":");
+      if (parts.length < 2) return null;
+      const label = parts.slice(0, -1).join(":").trim();
+      const rawValue = parts[parts.length - 1].trim();
+      const numeric = Number.parseFloat(rawValue.replace("%", ""));
+      if (!label || !Number.isFinite(numeric)) return null;
+      return {
+        label,
+        value: numeric,
+        displayValue: rawValue.includes("%") ? rawValue : `${rawValue}`,
+      };
+    })
+    .filter((item): item is BreakdownItem => Boolean(item));
+}
+
+function BreakdownChart({ title, items, suffix = "" }: { title: string; items: BreakdownItem[]; suffix?: string }) {
+  if (!items.length) {
+    return (
+      <div>
+        <p className="eyebrow">{title}</p>
+        <p className="detail-muted">-</p>
+      </div>
+    );
+  }
+  const maxValue = Math.max(...items.map((item) => item.value), 1);
+  return (
+    <div>
+      <p className="eyebrow">{title}</p>
+      <div className="mini-chart">
+        {items.map((item) => (
+          <div key={`${title}-${item.label}`} className="mini-chart-row">
+            <div className="mini-chart-meta">
+              <span>{item.label}</span>
+              <strong>{item.displayValue}{suffix}</strong>
+            </div>
+            <div className="mini-chart-track">
+              <div className="mini-chart-fill" style={{ width: `${Math.max((item.value / maxValue) * 100, 6)}%` }} />
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function trafficTone(value: string | undefined) {
+  const normalized = String(value || "").toLowerCase();
+  if (normalized.includes("missing") || normalized.includes("inconsistent") || normalized.includes("negative")) return "bad";
+  if (normalized.includes("partial") || normalized.includes("medium") || normalized.includes("investigat")) return "mid";
+  if (normalized.includes("strong") || normalized.includes("good") || normalized.includes("visible")) return "good";
+  return "neutral";
+}
+
+function sourceLabel(source: string) {
+  if (source === "peec") return "Peec";
+  if (source === "csv") return "CSV";
+  if (source === "sample") return "Sample";
+  if (source === "saved_run") return "Re-aggregated";
+  return source;
 }
 
 function percent(value: number | string | undefined) {
@@ -236,8 +365,9 @@ function SelectControl({
 
 function GapCard({ row, selected, onSelect }: { row: GapRow; selected: boolean; onSelect: () => void }) {
   const visible = Math.max(0, Math.min(100, Number(row.visibility_share || 0) * 100));
+  const accentStyle = featureAccentStyle(row.mapped_feature_id || row.mapped_feature_name, selected);
   return (
-    <button className={`gap-card ${selected ? "selected" : ""}`} onClick={onSelect}>
+    <button className={`gap-card ${selected ? "selected" : ""}`} style={accentStyle} onClick={onSelect}>
       <div className="gap-card-top">
         <span className={`severity severity-${row.gap_severity}`}>{row.gap_severity}</span>
         <span className="strict-pill">{row.is_feature_visibility_gap ? "strict gap" : row.gap_category}</span>
@@ -269,6 +399,7 @@ function App() {
   const [targetBrand, setTargetBrand] = useState("Peec AI");
   const [normalizer, setNormalizer] = useState<Mode>("openai_mock");
   const [brandDetector, setBrandDetector] = useState<BrandMode>("openai_mock");
+  const [featureEvidenceMode, setFeatureEvidenceMode] = useState<FeatureEvidenceMode>("openai_mock");
   const [embeddingBackend, setEmbeddingBackend] = useState("hash");
   const [aggregationMode, setAggregationMode] = useState("prompt");
   const [featureMode, setFeatureMode] = useState("mock");
@@ -279,15 +410,16 @@ function App() {
   const [result, setResult] = useState<ApiResult | null>(null);
   const [error, setError] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
-  const [resultSource, setResultSource] = useState<"sample" | "peec" | "csv" | null>(null);
+  const [resultSource, setResultSource] = useState<"sample" | "peec" | "csv" | "saved_run" | null>(null);
   const [resultsMode, setResultsMode] = useState<"gaps" | "all">("all");
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [workspaceView, setWorkspaceView] = useState<AppView>("setup");
+  const [resultsTab, setResultsTab] = useState<ResultsTab>("dashboard");
   const [runLogs, setRunLogs] = useState<RunLogEntry[]>([]);
   const [activeStage, setActiveStage] = useState("");
   const [savedRuns, setSavedRuns] = useState<RunSummary[]>([]);
   const [selectedRunId, setSelectedRunId] = useState("");
-  const [mappings, setMappings] = useState<MappingRow[]>([]);
-  const [mappingLoading, setMappingLoading] = useState(false);
+  const [runMappings, setRunMappings] = useState<MappingRow[]>([]);
+  const [runMappingsLoading, setRunMappingsLoading] = useState(false);
 
   const sortedOverview = useMemo(() => {
     const rows = [...(result?.overview ?? [])];
@@ -307,10 +439,59 @@ function App() {
   const featureCount = new Set(sortedOverview.map((row) => row.mapped_feature_name)).size;
   const visibleRows = resultsMode === "gaps" ? sortedOverview.filter((row) => row.is_feature_visibility_gap) : sortedOverview;
   const selected = visibleRows[Math.min(selectedIndex, Math.max(visibleRows.length - 1, 0))];
+  const selectedModelBreakdown = useMemo(
+    () => parseBreakdown(selected?.model_visibility_breakdown || selected?.model_breakdown),
+    [selected],
+  );
+  const selectedSourceBreakdown = useMemo(
+    () => parseBreakdown(selected?.top_source_domains),
+    [selected],
+  );
+  const selectedComparison = useMemo(() => {
+    if (!selected) return [] as BreakdownItem[];
+    const items: BreakdownItem[] = [
+      {
+        label: selectedRunSummary?.target_brand || targetBrand || "Target",
+        value: Number(selected.visibility_share || 0) * 100,
+        displayValue: percent(selected.visibility_share),
+      },
+    ];
+    if (selected.top_competitor_brand_name) {
+      items.push({
+        label: selected.top_competitor_brand_name,
+        value: Number(selected.top_competitor_visibility_share || 0) * 100,
+        displayValue: percent(selected.top_competitor_visibility_share),
+      });
+    }
+    return items;
+  }, [selected, selectedRunSummary, targetBrand]);
+  const selectedDetailStyle = useMemo(
+    () => featureAccentStyle(selected?.mapped_feature_id || selected?.mapped_feature_name, true),
+    [selected],
+  );
+  const groupedRunMappings = useMemo(() => {
+    const groups = new Map<string, { featureName: string; queries: MappingRow[] }>();
+    for (const row of runMappings) {
+      const featureName = row.mapped_feature_name || "Unmapped";
+      const key = row.mapped_feature_id || featureName;
+      if (!groups.has(key)) {
+        groups.set(key, { featureName, queries: [] });
+      }
+      groups.get(key)!.queries.push(row);
+    }
+    return Array.from(groups.values())
+      .map((group) => ({
+        ...group,
+        queries: group.queries
+          .sort((left, right) => String(left.canonical_query || left.original_prompt || "").localeCompare(String(right.canonical_query || right.original_prompt || ""))),
+      }))
+      .sort((left, right) => right.queries.length - left.queries.length || left.featureName.localeCompare(right.featureName));
+  }, [runMappings]);
+  const selectedRunSummary = useMemo(() => savedRuns.find((run) => run.run_id === selectedRunId) || null, [savedRuns, selectedRunId]);
   const peecReady = Boolean(startDate && endDate && targetBrand && featureFile);
   const csvReady = Boolean(promptsCsv && brandsCsv && targetBrand && featureFile);
   const uploadReady = dataSource === "peec" ? peecReady : csvReady;
-  const realModeSelected = normalizer === "openai" || brandDetector === "openai" || featureMode === "openai";
+  const realModeSelected = normalizer === "openai" || brandDetector === "openai" || featureMode === "openai" || featureEvidenceMode === "openai";
 
   function appendLog(event: ProgressEvent) {
     if (event.type === "run") {
@@ -427,6 +608,29 @@ function App() {
     if (data.ok) setSavedRuns(data.runs);
   }
 
+  function applyResultState(data: ApiResult, source: "sample" | "peec" | "csv" | "saved_run") {
+    setResult(data);
+    setResultSource(source);
+    const hasStrictGaps = (data.overview || []).some((row) => Boolean(row.is_feature_visibility_gap));
+    if (!hasStrictGaps) {
+      setResultsMode("all");
+    }
+  }
+
+  function goToResults() {
+    if (result) {
+      setWorkspaceView("results");
+      setResultsTab("dashboard");
+    }
+  }
+
+  function goToFeatures() {
+    if (selectedRunId) {
+      setWorkspaceView("results");
+      setResultsTab("features");
+    }
+  }
+
   useEffect(() => {
     refreshRuns().catch(() => {});
   }, []);
@@ -462,12 +666,13 @@ function App() {
       const response = await fetch("/api/analyze-sample", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ target_brand: "Peec AI", normalizer, brand_detector: brandDetector, embedding_backend: embeddingBackend, aggregation_mode: aggregationMode }),
+        body: JSON.stringify({ target_brand: "Peec AI", normalizer, brand_detector: brandDetector, feature_evidence_mode: featureEvidenceMode, embedding_backend: embeddingBackend, aggregation_mode: aggregationMode }),
       });
       const data = (await response.json()) as ApiResult;
       if (!response.ok || !data.ok) throw new Error(data.error || data.stderr || "Sample analysis failed.");
-      setResult(data);
-      setResultSource("sample");
+      applyResultState(data, "sample");
+      setWorkspaceView("results");
+      setResultsTab("dashboard");
       if (data.run_id) setSelectedRunId(data.run_id);
       await refreshRuns();
     } catch (err) {
@@ -504,6 +709,7 @@ function App() {
       form.append("target_brand", targetBrand);
       form.append("normalizer", normalizer);
       form.append("brand_detector", brandDetector);
+      form.append("feature_evidence_mode", featureEvidenceMode);
       form.append("embedding_backend", embeddingBackend);
       form.append("aggregation_mode", aggregationMode);
       form.append("feature_mode", featureMode);
@@ -514,8 +720,9 @@ function App() {
         throw new Error(data.error || data.stderr || "Analysis failed.");
       }
       const data = await consumeStream(response);
-      setResult(data);
-      setResultSource(dataSource);
+      applyResultState(data, dataSource);
+      setWorkspaceView("results");
+      setResultsTab("dashboard");
       if (data.run_id) setSelectedRunId(data.run_id);
       await refreshRuns();
     } catch (err) {
@@ -525,7 +732,7 @@ function App() {
     }
   }
 
-  async function openSavedRun(runId: string) {
+  async function openSavedRun(runId: string, targetTab: ResultsTab = "dashboard") {
     setLoading(true);
     setError("");
     setSelectedIndex(0);
@@ -533,11 +740,12 @@ function App() {
       const response = await fetch(`/api/runs/${runId}`);
       const data = (await response.json()) as ApiResult;
       if (!response.ok || !data.ok) throw new Error(data.error || "Failed to load saved run.");
-      setResult(data);
+      applyResultState(data, "saved_run");
       setSelectedRunId(runId);
-      setResultSource("csv");
+      setWorkspaceView("results");
+      setResultsTab(targetTab);
       setRunLogs([]);
-      setActiveStage("Loaded saved run");
+      setActiveStage(`Loaded saved run ${runId}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load saved run.");
     } finally {
@@ -545,21 +753,24 @@ function App() {
     }
   }
 
-  async function reaggregateRun() {
-    if (!selectedRunId) return;
+  async function reaggregateRun(runIdOverride?: string) {
+    const runId = runIdOverride || selectedRunId;
+    if (!runId) return;
     setLoading(true);
     setError("");
     setRunLogs([]);
     setActiveStage("Re-aggregating saved run");
     try {
-      const response = await fetch(`/api/runs/${selectedRunId}/reaggregate`, {
+      const response = await fetch(`/api/runs/${runId}/reaggregate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ aggregation_mode: aggregationMode }),
       });
       const data = (await response.json()) as ApiResult;
       if (!response.ok || !data.ok) throw new Error(data.error || "Re-aggregation failed.");
-      setResult(data);
+      applyResultState(data, "saved_run");
+      setWorkspaceView("results");
+      setResultsTab("dashboard");
       if (data.run_id) setSelectedRunId(data.run_id);
       await refreshRuns();
     } catch (err) {
@@ -570,178 +781,222 @@ function App() {
   }
 
   useEffect(() => {
-    if (!selectedRunId || !selected) {
-      setMappings([]);
+    if (!selectedRunId) {
+      setRunMappings([]);
       return;
     }
     let cancelled = false;
-    setMappingLoading(true);
-    fetch(
-      `/api/runs/${selectedRunId}/mappings?feature_id=${encodeURIComponent(selected.mapped_feature_id)}&cluster_id=${encodeURIComponent(selected.cluster_id)}&limit=100`,
-    )
+    setRunMappingsLoading(true);
+    fetch(`/api/runs/${selectedRunId}/mappings?limit=1000`)
       .then((response) => response.json())
       .then((data: { ok: boolean; mappings: MappingRow[] }) => {
-        if (!cancelled && data.ok) setMappings(data.mappings);
+        if (!cancelled && data.ok) setRunMappings(data.mappings);
       })
       .catch(() => {
-        if (!cancelled) setMappings([]);
+        if (!cancelled) setRunMappings([]);
       })
       .finally(() => {
-        if (!cancelled) setMappingLoading(false);
+        if (!cancelled) setRunMappingsLoading(false);
       });
     return () => {
       cancelled = true;
     };
-  }, [selectedRunId, selected?.mapped_feature_id, selected?.cluster_id]);
+  }, [selectedRunId]);
 
   return (
-    <main className="app-shell">
-      <button className="icon-button settings-trigger" onClick={() => setSettingsOpen((value) => !value)} title="Run settings">
-        <Settings2 size={18} />
-      </button>
-
-      <aside className="sidebar">
-        <div className="brand-lockup">
-          <div className="mark">
-            <BarChart3 size={22} />
-          </div>
-          <div>
-            <h1>Feature Visibility</h1>
-            <p>AI answer gap analysis</p>
-          </div>
-        </div>
-
-        <div className={`service-card ${apiOnline ? "online" : apiOnline === false ? "offline" : ""}`}>
-          <Server size={17} />
-          <span>{apiOnline === null ? "Checking API" : apiOnline ? "API connected" : "API unavailable"}</span>
-        </div>
-
-        <section className="panel">
-          <div className="panel-title">
-            <Database size={16} />
-            <h2>Inputs</h2>
-          </div>
-          <div className="segment">
-            <button className={dataSource === "peec" ? "active" : ""} onClick={() => setDataSource("peec")}>Peec MCP</button>
-            <button className={dataSource === "csv" ? "active" : ""} onClick={() => setDataSource("csv")}>CSV fallback</button>
-          </div>
-          {dataSource === "peec" ? (
-            <div className="compact-fields">
-              <label className="field">
-                <span>Peec project ID (optional)</span>
-                <input
-                  value={projectId}
-                  placeholder="Defaults to first accessible Peec project"
-                  onChange={(event) => setProjectId(event.target.value)}
-                />
-              </label>
-              <div className="two-col">
-                <label className="field">
-                  <span>Start date</span>
-                  <input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} />
-                </label>
-                <label className="field">
-                  <span>End date</span>
-                  <input type="date" value={endDate} onChange={(event) => setEndDate(event.target.value)} />
-                </label>
-              </div>
+    <main className="app-shell app-shell-print">
+      <section className="workspace workspace-print">
+        <header className="print-header">
+          <div className="print-brand">
+            <div className="mark">
+              <BarChart3 size={18} />
             </div>
-          ) : (
-            <>
-              <FilePicker label="Prompts CSV" accept=".csv" file={promptsCsv} onChange={setPromptsCsv} />
-              <FilePicker label="Brands CSV" accept=".csv" file={brandsCsv} onChange={setBrandsCsv} />
-            </>
-          )}
-          <FilePicker label="Feature CSV or PDF" accept=".csv,.pdf" file={featureFile} onChange={setFeatureFile} />
-          {dataSource === "peec" ? <FilePicker label="Brands CSV override" accept=".csv" file={brandsCsv} onChange={setBrandsCsv} /> : null}
-          {dataSource === "peec" ? <div className="notice">Prompts and responses come from Peec MCP. If project ID is empty, the first accessible Peec project is used. Brand CSV is optional.</div> : null}
-        </section>
-
-        <div className="actions">
-          <button className="button button-primary" onClick={analyzeUpload} disabled={loading || !uploadReady || apiOnline === false}>
-            {loading ? <Loader2 className="spin" size={17} /> : <Play size={17} />}
-            Run analysis
-          </button>
-          <button className="button button-secondary" onClick={analyzeSample} disabled={loading || apiOnline === false}>
-            <FileText size={17} />
-            Load sample
-          </button>
-        </div>
-      </aside>
-
-      <section className="workspace">
-        <header className="topbar">
-          <div>
-            <p className="eyebrow">Target brand</p>
-            {brandOptions.length ? (
-              <select className="top-select" value={targetBrand} onChange={(event) => setTargetBrand(event.target.value)}>
-                {brandOptions.map((name) => <option key={name} value={name}>{name}</option>)}
-              </select>
-            ) : (
-              <input className="top-input" value={targetBrand} onChange={(event) => setTargetBrand(event.target.value)} />
-            )}
+            <strong>Feature Visibility</strong>
           </div>
-          <div className="top-actions">
-            <div className="status-pill">
-              {loading ? <Loader2 className="spin" size={16} /> : result?.ok ? <CheckCircle2 size={16} /> : <AlertCircle size={16} />}
-              {loading ? activeStage || "Running analysis" : result?.ok ? `Analysis ready · ${resultSource}` : uploadReady ? "Ready to run" : "Waiting for inputs"}
-            </div>
+          <nav className="print-steps">
+            <button className={workspaceView === "setup" ? "active" : ""} onClick={() => setWorkspaceView("setup")}>
+              <span>1</span>
+              Setup
+            </button>
+            <button
+              className={workspaceView === "results" ? "active" : ""}
+              onClick={goToResults}
+              disabled={!result}
+            >
+              <span>2</span>
+              Results
+            </button>
+          </nav>
+          <div className={`print-status ${apiOnline ? "online" : apiOnline === false ? "offline" : ""}`}>
+            <span className="status-dot" />
+            {apiOnline === null ? "Checking API" : apiOnline ? "API connected" : "API unavailable"}
           </div>
         </header>
 
-        {settingsOpen ? (
-          <section className="settings-popover">
-            <SelectControl label="Prompt normalizer" value={normalizer} options={["openai_mock", "heuristic", "openai"]} onChange={(value) => setNormalizer(value as Mode)} />
-            <SelectControl label="Brand detector" value={brandDetector} options={["openai_mock", "keyword", "openai"]} onChange={(value) => setBrandDetector(value as BrandMode)} />
-            <SelectControl label="PDF extraction" value={featureMode} options={["mock", "openai"]} onChange={setFeatureMode} />
-            <SelectControl label="Embeddings" value={embeddingBackend} options={["hash", "bge-m3"]} onChange={setEmbeddingBackend} />
-            <SelectControl label="Aggregation" value={aggregationMode} options={["response", "prompt", "prompt_model"]} onChange={setAggregationMode} />
-            <label className="field">
-              <span>Peec chat limit</span>
-              <input value={peecLimit} onChange={(event) => setPeecLimit(event.target.value.replace(/[^\d]/g, "") || "")} />
-            </label>
-            {realModeSelected ? <div className="notice">Real LLM modes require `OPENAI_API_KEY` in the API server environment.</div> : null}
+        {error ? <div className="error-banner">{error}</div> : null}
+
+        {workspaceView === "setup" ? (
+          <section className="setup-screen">
+            <div className="setup-hero">
+              <h1>Find your AI visibility gaps</h1>
+              <p>
+                This tool checks whether AI assistants mention your product when users ask about specific
+                features and shows where competitors are appearing instead.
+              </p>
+              <blockquote>
+                One report that tells product, content, SEO, and engineering exactly which features are invisible
+                to AI and who is winning in your place.
+              </blockquote>
+              <div className="hero-tags">
+                <span>Product</span>
+                <span>Content</span>
+                <span>SEO</span>
+                <span>Engineering</span>
+              </div>
+            </div>
+
+            <div className="setup-stack">
+              <section className="setup-card">
+                <div className="setup-card-title">
+                  <span className="step-dot">1</span>
+                  <h2>Name your brand</h2>
+                </div>
+                <label className="field">
+                  <span>Your brand name</span>
+                  {brandOptions.length ? (
+                    <select value={targetBrand} onChange={(event) => setTargetBrand(event.target.value)}>
+                      {brandOptions.map((name) => <option key={name} value={name}>{name}</option>)}
+                    </select>
+                  ) : (
+                    <input value={targetBrand} onChange={(event) => setTargetBrand(event.target.value)} />
+                  )}
+                </label>
+                <p className="helper-copy">This is the brand we will look for inside AI-generated answers.</p>
+              </section>
+
+              <section className="setup-card">
+                <div className="setup-card-title">
+                  <span className="step-dot">2</span>
+                  <h2>Upload your feature list</h2>
+                </div>
+                <label className="field">
+                  <span>Feature list (CSV or PDF)</span>
+                </label>
+                <FilePicker label="Feature CSV or PDF" accept=".csv,.pdf" file={featureFile} onChange={setFeatureFile} />
+                <p className="helper-copy">Each row should have a feature name and a short description of what it does.</p>
+              </section>
+
+              <details className="advanced-settings" open={dataSource === "csv"}>
+                <summary>Advanced settings</summary>
+                <div className="advanced-grid">
+                  <div className="segment">
+                    <button className={dataSource === "peec" ? "active" : ""} onClick={() => setDataSource("peec")}>Peec MCP</button>
+                    <button className={dataSource === "csv" ? "active" : ""} onClick={() => setDataSource("csv")}>CSV fallback</button>
+                  </div>
+                  {dataSource === "peec" ? (
+                    <div className="compact-fields">
+                      <label className="field">
+                        <span>Peec project ID (optional)</span>
+                        <input
+                          value={projectId}
+                          placeholder="Defaults to first accessible Peec project"
+                          onChange={(event) => setProjectId(event.target.value)}
+                        />
+                      </label>
+                      <div className="two-col">
+                        <label className="field">
+                          <span>Start date</span>
+                          <input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} />
+                        </label>
+                        <label className="field">
+                          <span>End date</span>
+                          <input type="date" value={endDate} onChange={(event) => setEndDate(event.target.value)} />
+                        </label>
+                      </div>
+                      <FilePicker label="Brands CSV override" accept=".csv" file={brandsCsv} onChange={setBrandsCsv} />
+                      <div className="notice">Prompts and responses come from Peec MCP. Brand CSV is optional.</div>
+                    </div>
+                  ) : (
+                    <div className="compact-fields">
+                      <FilePicker label="Prompts CSV" accept=".csv" file={promptsCsv} onChange={setPromptsCsv} />
+                      <FilePicker label="Brands CSV" accept=".csv" file={brandsCsv} onChange={setBrandsCsv} />
+                    </div>
+                  )}
+
+                  <div className="advanced-controls">
+                    <SelectControl label="Prompt normalizer" value={normalizer} options={["openai_mock", "heuristic", "openai"]} onChange={(value) => setNormalizer(value as Mode)} />
+                    <SelectControl label="Brand detector" value={brandDetector} options={["openai_mock", "keyword", "openai"]} onChange={(value) => setBrandDetector(value as BrandMode)} />
+                    <SelectControl label="Feature evidence" value={featureEvidenceMode} options={["openai_mock", "keyword", "openai"]} onChange={(value) => setFeatureEvidenceMode(value as FeatureEvidenceMode)} />
+                    <SelectControl label="PDF extraction" value={featureMode} options={["mock", "openai"]} onChange={setFeatureMode} />
+                    <SelectControl label="Embeddings" value={embeddingBackend} options={["hash", "bge-m3"]} onChange={setEmbeddingBackend} />
+                    <SelectControl label="Aggregation" value={aggregationMode} options={["response", "prompt", "prompt_model"]} onChange={setAggregationMode} />
+                    <label className="field">
+                      <span>Peec chat limit</span>
+                      <input value={peecLimit} onChange={(event) => setPeecLimit(event.target.value.replace(/[^\d]/g, "") || "")} />
+                    </label>
+                  </div>
+                  {realModeSelected ? <div className="notice">Real LLM modes require `OPENAI_API_KEY` in the API server environment.</div> : null}
+                </div>
+              </details>
+
+              <div className="setup-actions">
+                <button className="button button-primary button-hero" onClick={analyzeUpload} disabled={loading || !uploadReady || apiOnline === false}>
+                  {loading ? <Loader2 className="spin" size={18} /> : <Play size={18} />}
+                  {loading ? activeStage || "Running analysis" : "Run analysis"}
+                </button>
+                <button className="button button-secondary" onClick={analyzeSample} disabled={loading || apiOnline === false}>
+                  <FileText size={17} />
+                  Load sample
+                </button>
+              </div>
+
+              {!uploadReady && !result ? (
+                <div className="setup-banner">
+                  {dataSource === "peec"
+                    ? "Choose a date range and upload one feature CSV or PDF. Project ID is optional."
+                    : "Upload prompts, brands, and one feature CSV or PDF."}
+                </div>
+              ) : null}
+            </div>
           </section>
         ) : null}
 
-        {error ? <div className="error-banner">{error}</div> : null}
-        {!uploadReady && !result ? (
-          <div className="setup-banner">{dataSource === "peec" ? "Choose a date range and upload one feature CSV or PDF. Project ID is optional, or run the built-in sample." : "Upload prompts, brands, and one feature CSV or PDF, or run the built-in sample."}</div>
-        ) : null}
-
+        {workspaceView === "results" ? (
+          <>
+        <section className="results-tabs">
+          <div className="results-tabs-shell">
+            <div className="results-tabs-copy">
+              <h2>Analysis</h2>
+              <p>{selectedRunSummary ? formatRunLabel(selectedRunSummary) : "Open a run and inspect it from multiple angles"}</p>
+            </div>
+            <div className="results-tabbar" role="tablist" aria-label="Analysis views">
+              <button className={`results-tab ${resultsTab === "dashboard" ? "active" : ""}`} onClick={() => setResultsTab("dashboard")} aria-selected={resultsTab === "dashboard"}>
+                <strong>Dashboard</strong>
+                <span>Visibility summary</span>
+              </button>
+              <button className={`results-tab ${resultsTab === "history" ? "active" : ""}`} onClick={() => setResultsTab("history")} aria-selected={resultsTab === "history"}>
+                <strong>History</strong>
+                <span>Saved runs</span>
+              </button>
+              <button
+                className={`results-tab ${resultsTab === "features" ? "active" : ""}`}
+                onClick={() => setResultsTab("features")}
+                disabled={!selectedRunId}
+                aria-selected={resultsTab === "features"}
+              >
+                <strong>Features</strong>
+                <span>Mapped queries</span>
+              </button>
+            </div>
+          </div>
+        </section>
+        {resultsTab === "dashboard" ? (
+          <>
         <section className="kpi-grid">
           <div className="kpi"><span>Strict gaps</span><strong>{strictGapCount}</strong></div>
           <div className="kpi"><span>Average visibility</span><strong>{percent(avgVisibility)}</strong></div>
           <div className="kpi"><span>Features</span><strong>{featureCount}</strong></div>
           <div className="kpi"><span>Rows analyzed</span><strong>{result?.metadata?.brand_count ? String(result.metadata.brand_count) : "-"}</strong></div>
-        </section>
-
-        <section className="saved-runs-panel">
-          <div className="section-heading">
-            <div>
-              <h2>Saved runs</h2>
-              <p>{savedRuns.length} persisted runs</p>
-            </div>
-            {selectedRunId ? (
-              <button className="button button-secondary" onClick={reaggregateRun} disabled={loading}>
-                Re-aggregate
-              </button>
-            ) : null}
-          </div>
-          <div className="saved-runs-list">
-            {savedRuns.slice(0, 8).map((run) => (
-              <button
-                key={run.run_id}
-                className={`saved-run-card ${run.run_id === selectedRunId ? "selected" : ""}`}
-                onClick={() => openSavedRun(run.run_id)}
-              >
-                <strong>{run.source}</strong>
-                <span>{run.target_brand}</span>
-                <span>{run.aggregation_mode}</span>
-                <span>{run.prompt_rows} rows</span>
-              </button>
-            ))}
-          </div>
         </section>
 
         {runLogs.length ? (
@@ -769,91 +1024,187 @@ function App() {
           </section>
         ) : null}
 
-        <div className="content-grid">
-          <section className="results-column">
+          <div className="content-grid">
+            <section className="results-column">
+              <div className="section-heading">
+                <div>
+                  <h2>Ranked gaps</h2>
+                  <p>{selectedRunSummary ? formatRunLabel(selectedRunSummary) : `${visibleRows.length} visible rows`}</p>
+                </div>
+                <div className="toolbar">
+                  <div className="mini-segment">
+                    <button className={resultsMode === "all" ? "active" : ""} onClick={() => setResultsMode("all")}>All</button>
+                    <button className={resultsMode === "gaps" ? "active" : ""} onClick={() => setResultsMode("gaps")}>Strict gaps</button>
+                  </div>
+                  <CsvDownload rows={sortedOverview as unknown as Record<string, unknown>[]} filename="feature_gap_overview.csv" />
+                </div>
+              </div>
+              {loading ? (
+                <div className="empty-state">
+                  <Loader2 className="spin" size={28} />
+                  Run buffer
+                  <small>{activeStage || "Live stage updates"}</small>
+                </div>
+              ) : visibleRows.length ? (
+                <div className="gap-list">
+                  {visibleRows.map((row, index) => (
+                    <GapCard key={`${row.mapped_feature_name}-${row.cluster_label}-${index}`} row={row} selected={index === selectedIndex} onSelect={() => setSelectedIndex(index)} />
+                  ))}
+                </div>
+              ) : (
+                <div className="empty-state">
+                  {result
+                    ? resultsMode === "gaps" && sortedOverview.length
+                      ? "This run has no strict gaps. Switch to All to inspect the saved results."
+                      : "No rows match the current filter."
+                    : "No selected run. Open a saved run from History or run a new analysis."}
+                </div>
+              )}
+            </section>
+
+            <section className="detail-panel" style={selected ? selectedDetailStyle : undefined}>
+              <div className="section-heading">
+                <h2>Detail</h2>
+              </div>
+              {selected ? (
+                <div className="detail-stack">
+                  <div>
+                    <p className="eyebrow">Feature</p>
+                    <h3>{selected.mapped_feature_name}</h3>
+                    <p>{selected.cluster_label}</p>
+                  </div>
+                  <div className="detail-metrics">
+                    <div><span>Visibility</span><strong>{percent(selected.visibility_share)}</strong></div>
+                    <div><span>Status</span><strong className={`traffic-${trafficTone(selected.target_visibility_status)}`}>{selected.target_visibility_status}</strong></div>
+                    <div><span>Competitor</span><strong>{selected.top_competitor_brand_name || "-"}</strong></div>
+                  </div>
+                  <div className="detail-metrics">
+                    <div><span>Feature evidence</span><strong>{selected.target_feature_visible_count ?? 0}/{selected.prompt_count}</strong></div>
+                    <div><span>Prompts</span><strong>{selected.prompt_count}</strong></div>
+                    <div><span>Signal</span><strong className={`traffic-${trafficTone(selected.signal || selected.target_visibility_status)}`}>{selected.signal || "-"}</strong></div>
+                  </div>
+                  <div className="reason-box">{selected.gap_reason}</div>
+                  <BreakdownChart title="Visibility comparison" items={selectedComparison} />
+                  <div>
+                    <p className="eyebrow">Top query</p>
+                    <p>{selected.top_query || "-"}</p>
+                  </div>
+                  <div>
+                    <p className="eyebrow">Example queries</p>
+                    <ul className="query-list">
+                      {(selected.example_queries || "").split(";").filter(Boolean).slice(0, 5).map((query) => (
+                        <li key={query}>{query}</li>
+                      ))}
+                    </ul>
+                  </div>
+                  <BreakdownChart title="Models" items={selectedModelBreakdown} suffix="" />
+                  <BreakdownChart title="Sources" items={selectedSourceBreakdown} suffix="" />
+                </div>
+              ) : (
+                <div className="empty-state">Select a gap to inspect.</div>
+              )}
+            </section>
+          </div>
+          </>
+        ) : null}
+
+        {resultsTab === "history" ? (
+          <section className="history-page">
             <div className="section-heading">
               <div>
-                <h2>Ranked gaps</h2>
-                <p>{visibleRows.length} visible rows</p>
-              </div>
-              <div className="toolbar">
-                <div className="mini-segment">
-                  <button className={resultsMode === "all" ? "active" : ""} onClick={() => setResultsMode("all")}>All</button>
-                  <button className={resultsMode === "gaps" ? "active" : ""} onClick={() => setResultsMode("gaps")}>Strict gaps</button>
-                </div>
-                <CsvDownload rows={sortedOverview as unknown as Record<string, unknown>[]} filename="feature_gap_overview.csv" />
+                <h2>History</h2>
+                <p>{savedRuns.length} saved runs</p>
               </div>
             </div>
-            {loading ? (
-              <div className="empty-state">
-                <Loader2 className="spin" size={28} />
-                Run buffer
-                <small>{activeStage || "Live stage updates"}</small>
-              </div>
-            ) : visibleRows.length ? (
-              <div className="gap-list">
-                {visibleRows.map((row, index) => (
-                  <GapCard key={`${row.mapped_feature_name}-${row.cluster_label}-${index}`} row={row} selected={index === selectedIndex} onSelect={() => setSelectedIndex(index)} />
+            {savedRuns.length ? (
+              <div className="history-list">
+                {savedRuns.map((run) => (
+                  <button
+                    key={run.run_id}
+                    className={`history-card ${run.run_id === selectedRunId ? "selected" : ""}`}
+                    onClick={() => openSavedRun(run.run_id, "dashboard")}
+                    disabled={loading}
+                  >
+                    <div className="history-card-top">
+                      <div>
+                        <strong>{formatRunLabel(run)}</strong>
+                        <p>{sourceLabel(run.source)} · {run.prompt_rows} rows · {run.overview_rows} overview rows</p>
+                      </div>
+                      {run.run_id === selectedRunId ? <span className="strict-pill">selected</span> : null}
+                    </div>
+                    <div className="history-actions">
+                      <span className="history-inline-hint">Click anywhere to load this run</span>
+                      <button
+                        className="button button-secondary"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          reaggregateRun(run.run_id);
+                        }}
+                        disabled={loading}
+                      >
+                        Re-aggregate
+                      </button>
+                    </div>
+                  </button>
                 ))}
               </div>
             ) : (
-              <div className="empty-state">{result ? "No rows match the current filter." : "Run a sample or upload files to see feature visibility gaps."}</div>
+              <div className="empty-state">No saved runs yet. Run an analysis to create one.</div>
             )}
           </section>
+        ) : null}
 
-          <section className="detail-panel">
+        {resultsTab === "features" ? (
+          <section className="mappings-page">
             <div className="section-heading">
-              <h2>Detail</h2>
+              <div>
+                <h2>Features</h2>
+                <p>{selectedRunSummary ? `${formatRunLabel(selectedRunSummary)} · queries mapped to each feature` : "Queries mapped to each feature for this run"}</p>
+              </div>
+              <div className="toolbar">
+                <CsvDownload rows={runMappings as unknown as Record<string, unknown>[]} filename="saved_run_feature_mappings.csv" />
+              </div>
             </div>
-            {selected ? (
-              <div className="detail-stack">
-                <div>
-                  <p className="eyebrow">Feature</p>
-                  <h3>{selected.mapped_feature_name}</h3>
-                  <p>{selected.cluster_label}</p>
-                </div>
-                <div className="detail-metrics">
-                  <div><span>Visibility</span><strong>{percent(selected.visibility_share)}</strong></div>
-                  <div><span>Status</span><strong>{selected.target_visibility_status}</strong></div>
-                  <div><span>Competitor</span><strong>{selected.top_competitor_brand_name || "-"}</strong></div>
-                </div>
-                <div className="reason-box">{selected.gap_reason}</div>
-                <div>
-                  <p className="eyebrow">Top query</p>
-                  <p>{selected.top_query || "-"}</p>
-                </div>
-                <div>
-                  <p className="eyebrow">Example queries</p>
-                  <ul className="query-list">
-                    {(selected.example_queries || "").split(";").filter(Boolean).slice(0, 5).map((query) => (
-                      <li key={query}>{query}</li>
-                    ))}
-                  </ul>
-                </div>
-                <div>
-                  <p className="eyebrow">Saved mappings</p>
-                  {mappingLoading ? (
-                    <p>Loading mappings...</p>
-                  ) : mappings.length ? (
+            {!selectedRunId ? (
+              <div className="empty-state">No selected run. Go to History and open a run first.</div>
+            ) : runMappingsLoading ? (
+              <div className="empty-state">Loading feature mappings...</div>
+            ) : groupedRunMappings.length ? (
+              <div className="feature-mapping-groups">
+                {groupedRunMappings.map((group) => (
+                  <div
+                    key={group.featureName}
+                    className="feature-mapping-card"
+                    style={featureAccentStyle(group.queries[0]?.mapped_feature_id || group.featureName)}
+                  >
+                    <div className="feature-mapping-header">
+                      <strong>{group.featureName}</strong>
+                      <span>{group.queries.length} queries</span>
+                    </div>
                     <ul className="query-list">
-                      {mappings.slice(0, 8).map((row) => (
-                        <li key={`${row.prompt_id}-${row.canonical_query}`}>
+                      {group.queries.map((row) => (
+                        <li key={`${group.featureName}-${row.prompt_id}-${row.canonical_query}`}>
                           <strong>{row.canonical_query || row.original_prompt || row.prompt_id}</strong>
                           <br />
                           {row.original_prompt || row.prompt_id}
+                          <br />
+                          <span className="mapping-meta">
+                            {(row.engine || "unknown model")} · feature {row.feature_present ? "detected" : "missing"} · brand {row.brand_present ? "present" : "absent"}
+                            {row.source_domains ? ` · ${row.source_domains}` : ""}
+                          </span>
                         </li>
                       ))}
                     </ul>
-                  ) : (
-                    <p>No saved mappings for this feature cluster.</p>
-                  )}
-                </div>
+                  </div>
+                ))}
               </div>
             ) : (
-              <div className="empty-state">Select a gap to inspect.</div>
+              <div className="empty-state">No feature-query mappings were saved for this run.</div>
             )}
           </section>
-        </div>
+        ) : null}
+          </>
+        ) : null}
       </section>
     </main>
   );

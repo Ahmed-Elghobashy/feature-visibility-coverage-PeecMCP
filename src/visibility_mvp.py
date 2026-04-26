@@ -46,10 +46,17 @@ CACHE_ROOT = Path(".cache/feature_visibility")
 
 PROMPT_COLUMNS = ("prompt", "raw_prompt", "query", "question", "text")
 RESPONSE_COLUMNS = ("response", "answer", "ai_response", "model_response", "output")
+SOURCE_COLUMNS = ("sources", "citations", "source_urls")
 FEATURE_NAME_COLUMNS = ("feature", "feature_name", "name", "title")
 FEATURE_DESCRIPTION_COLUMNS = ("description", "feature_description", "desc")
 BRAND_NAME_COLUMNS = ("brand", "brand_name", "name")
 BRAND_ALIAS_COLUMNS = ("aliases", "brand_aliases", "alias")
+
+STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "how", "if",
+    "in", "into", "is", "it", "its", "of", "on", "or", "that", "the", "their", "this",
+    "to", "tool", "tools", "track", "tracking", "with", "your",
+}
 
 
 @dataclass(frozen=True)
@@ -67,6 +74,8 @@ class Config:
     normalizer_model: str
     brand_detector: str
     brand_detector_model: str
+    feature_evidence_mode: str
+    feature_evidence_model: str
     cluster_threshold: float
     feature_threshold: float
     min_cluster_size: int
@@ -141,6 +150,7 @@ def main() -> int:
 
     prompt_col = pick_column(prompts, PROMPT_COLUMNS, "prompts")
     response_col = pick_optional_column(prompts, RESPONSE_COLUMNS)
+    source_col = pick_optional_column(prompts, SOURCE_COLUMNS)
     feature_name_col = pick_column(features, FEATURE_NAME_COLUMNS, "features")
     feature_desc_col = pick_column(features, FEATURE_DESCRIPTION_COLUMNS, "features")
 
@@ -250,14 +260,61 @@ def main() -> int:
     rows["mapped_feature_id"] = [m["feature_id"] for m in feature_mapping]
     rows["mapped_feature_name"] = [m["feature_name"] for m in feature_mapping]
     rows["feature_similarity"] = [m["similarity"] for m in feature_mapping]
+    feature_desc_map = features.set_index("feature_id")[feature_desc_col].astype(str).to_dict()
+    rows["mapped_feature_description"] = [
+        feature_desc_map.get(str(feature_id), "") if feature_id else ""
+        for feature_id in rows["mapped_feature_id"]
+    ]
     rows["feature_match_status"] = [
         "matched" if m["feature_id"] else "unmatched"
         for m in feature_mapping
     ]
+    rows["feature_terms"] = ""
+    feature_evidence_text = (
+        prompts[response_col].fillna("").astype(str)
+        if response_col
+        else prompts[prompt_col].fillna("").astype(str)
+    )
+    rows["source_domains"] = (
+        prompts[source_col].map(summarize_source_domains).fillna("").astype(str)
+        if source_col
+        else ""
+    )
+    rows["feature_present"] = False
+    rows["feature_evidence_strength"] = 0
 
     brand_started = time.perf_counter()
     emit_progress("detect_brands", "running", "Detecting brand presence in responses")
     brand_rows = expand_brand_rows(rows, brands, text_for_brand_detection, config)
+    feature_started = time.perf_counter()
+    emit_progress("judge_feature_evidence", "running", "Judging feature evidence in responses")
+    feature_present_values: list[bool] = []
+    feature_strength_values: list[int] = []
+    for _, row in brand_rows.iterrows():
+        feature_present, feature_strength = detect_feature_evidence(
+            query=str(row.get("canonical_query", "")),
+            response=str(row.get("response", "") or ""),
+            brand=str(row.get("brand_name", "")),
+            aliases=split_aliases(row.get("brand_aliases", "")),
+            feature_name=str(row.get("mapped_feature_name", "") or ""),
+            feature_description=str(row.get("mapped_feature_description", "") or ""),
+            feature_similarity=float(row.get("feature_similarity", 0) or 0),
+            brand_present=bool(row.get("brand_present", False)),
+            source_domains=str(row.get("source_domains", "") or ""),
+            config=config,
+        )
+        feature_present_values.append(feature_present)
+        feature_strength_values.append(feature_strength)
+    brand_rows["feature_present"] = feature_present_values
+    brand_rows["feature_evidence_strength"] = feature_strength_values
+    brand_rows["feature_visible"] = brand_rows["brand_present"] & brand_rows["feature_present"]
+    emit_progress(
+        "judge_feature_evidence",
+        "completed",
+        "Judged feature evidence in responses",
+        duration_ms=int((time.perf_counter() - feature_started) * 1000),
+        feature_present_rows=int(sum(1 for value in feature_present_values if value)),
+    )
     emit_progress(
         "detect_brands",
         "completed",
@@ -283,8 +340,8 @@ def main() -> int:
     gap_started = time.perf_counter()
     emit_progress("compute_gaps", "running", "Computing feature visibility gaps")
     target_brand = resolve_target_brand(brands, config)
-    feature_gap_overview = build_feature_gap_overview(coverage, rows, target_brand)
-    feature_gap_details = build_feature_gap_details(coverage, rows, target_brand)
+    feature_gap_overview = build_feature_gap_overview(coverage, brand_rows, target_brand)
+    feature_gap_details = build_feature_gap_details(coverage, brand_rows, target_brand)
     pm_summary = build_pm_summary(feature_gap_overview, target_brand)
     emit_progress(
         "compute_gaps",
@@ -379,6 +436,17 @@ def parse_args() -> Config:
         help="OpenAI model for --brand-detector openai.",
     )
     parser.add_argument(
+        "--feature-evidence-mode",
+        choices=("keyword", "openai", "openai_mock"),
+        default="openai_mock",
+        help="Feature evidence detector: keyword is strict; openai/openai_mock use an LLM judge.",
+    )
+    parser.add_argument(
+        "--feature-evidence-model",
+        default=DEFAULT_NORMALIZER_MODEL,
+        help="OpenAI model for --feature-evidence-mode openai.",
+    )
+    parser.add_argument(
         "--cluster-threshold",
         type=float,
         default=0.60,
@@ -426,6 +494,8 @@ def parse_args() -> Config:
         normalizer_model=args.normalizer_model,
         brand_detector=args.brand_detector,
         brand_detector_model=args.brand_detector_model,
+        feature_evidence_mode=args.feature_evidence_mode,
+        feature_evidence_model=args.feature_evidence_model,
         cluster_threshold=args.cluster_threshold,
         feature_threshold=args.feature_threshold,
         min_cluster_size=args.min_cluster_size,
@@ -451,6 +521,196 @@ def pick_optional_column(frame: pd.DataFrame, candidates: Sequence[str]) -> str 
         if candidate in by_lower:
             return by_lower[candidate]
     return None
+
+
+def tokenize_keywords(text: str) -> list[str]:
+    tokens = re.findall(r"[a-z0-9]{3,}", text.casefold())
+    return [token for token in tokens if token not in STOPWORDS]
+
+
+def feature_terms(name: str, description: str) -> list[str]:
+    seen: list[str] = []
+    for token in tokenize_keywords(f"{name} {description}"):
+        if token not in seen:
+            seen.append(token)
+    return seen[:12]
+
+
+def parse_sources_blob(value: object) -> list[dict[str, object]]:
+    if value is None:
+        return []
+    raw = str(value).strip()
+    if not raw or raw.casefold() == "nan":
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if isinstance(parsed, list):
+        return [item for item in parsed if isinstance(item, dict)]
+    return []
+
+
+def summarize_source_domains(value: object, limit: int = 5) -> str:
+    domains: list[str] = []
+    for item in parse_sources_blob(value):
+        domain = str(item.get("domain") or "").strip()
+        if domain and domain not in domains:
+            domains.append(domain)
+    return ";".join(domains[:limit])
+
+
+def feature_evidence_score(text: str, terms: Sequence[str]) -> tuple[bool, int]:
+    lowered = text.casefold()
+    matches = sum(1 for term in terms if term and term in lowered)
+    if not terms:
+        return False, 0
+    threshold = min(2, max(1, len(terms) // 4))
+    return matches >= threshold, matches
+
+
+def judge_feature_openai(
+    *,
+    query: str,
+    response: str,
+    brand: str,
+    aliases: Sequence[str],
+    feature_name: str,
+    feature_description: str,
+    model: str,
+) -> bool:
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("--feature-evidence-mode openai requires OPENAI_API_KEY.")
+
+    cache_key = {
+        "kind": "feature_evidence",
+        "model": model,
+        "query": query,
+        "response": response,
+        "brand": brand,
+        "aliases": list(aliases),
+        "feature_name": feature_name,
+        "feature_description": feature_description,
+    }
+    cached = cache_lookup("openai_feature_evidence.json", cache_key)
+    if isinstance(cached, bool):
+        return cached
+
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are a strict product-feature judge. Decide whether the AI response indicates "
+                    "that the named brand offers the specified feature. The feature can be implied by "
+                    "clear capability wording, not only exact phrase match. Return only JSON with "
+                    "{\"feature_present\": true} or {\"feature_present\": false}."
+                ),
+            },
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "query": query,
+                        "response": response,
+                        "brand": brand,
+                        "brand_aliases": list(aliases),
+                        "feature_name": feature_name,
+                        "feature_description": feature_description,
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ],
+        "temperature": 0,
+        "response_format": {"type": "json_object"},
+    }
+    request = urllib.request.Request(
+        "https://api.openai.com/v1/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response_obj:
+            body = json.loads(response_obj.read().decode("utf-8"))
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"OpenAI feature evidence call failed: {exc}") from exc
+
+    content = body["choices"][0]["message"]["content"]
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"OpenAI feature evidence returned invalid JSON: {content}") from exc
+    verdict = bool(parsed.get("feature_present"))
+    cache_store("openai_feature_evidence.json", cache_key, verdict)
+    return verdict
+
+
+def judge_feature_openai_mock(
+    *,
+    query: str,
+    response: str,
+    brand_present: bool,
+    feature_similarity: float,
+    feature_name: str,
+    feature_description: str,
+    source_domains: str,
+) -> tuple[bool, int]:
+    terms = feature_terms(feature_name, feature_description)
+    keyword_present, keyword_strength = feature_evidence_score(f"{response} {source_domains}", terms)
+    if keyword_present:
+        return True, keyword_strength
+    query_present, query_strength = feature_evidence_score(query, terms)
+    if brand_present and (query_present or feature_similarity >= 0.18):
+        return True, max(keyword_strength, query_strength, 1)
+    return False, max(keyword_strength, query_strength)
+
+
+def detect_feature_evidence(
+    *,
+    query: str,
+    response: str,
+    brand: str,
+    aliases: Sequence[str],
+    feature_name: str,
+    feature_description: str,
+    feature_similarity: float,
+    brand_present: bool,
+    source_domains: str,
+    config: Config,
+) -> tuple[bool, int]:
+    if not feature_name.strip():
+        return False, 0
+    terms = feature_terms(feature_name, feature_description)
+    if config.feature_evidence_mode == "openai":
+        verdict = judge_feature_openai(
+            query=query,
+            response=response,
+            brand=brand,
+            aliases=aliases,
+            feature_name=feature_name,
+            feature_description=feature_description,
+            model=config.feature_evidence_model,
+        )
+        present_by_terms, strength = feature_evidence_score(f"{response} {source_domains}", terms)
+        return verdict, max(strength, 1 if verdict else 0)
+    if config.feature_evidence_mode == "openai_mock":
+        return judge_feature_openai_mock(
+            query=query,
+            response=response,
+            brand_present=brand_present,
+            feature_similarity=feature_similarity,
+            feature_name=feature_name,
+            feature_description=feature_description,
+            source_domains=source_domains,
+        )
+    return feature_evidence_score(f"{response} {source_domains}", terms)
 
 
 def load_brands(config: Config) -> pd.DataFrame:
@@ -893,6 +1153,8 @@ def aggregate_coverage_group(group: pd.DataFrame, aggregation_mode: str) -> pd.D
     for _, unit in group.groupby(unit_cols, dropna=False, sort=False):
         first = unit.iloc[0].to_dict()
         first["brand_present"] = bool(unit["brand_present"].any())
+        first["feature_present"] = bool(unit["feature_present"].any()) if "feature_present" in unit.columns else False
+        first["feature_visible"] = bool(first["brand_present"] and first["feature_present"])
         first["prompt_id"] = join_ids(unit["prompt_id"])
         records.append(first)
     return pd.DataFrame.from_records(records)
@@ -913,6 +1175,8 @@ def build_coverage(rows: pd.DataFrame, min_coverage_n: int, aggregation_mode: st
                 "aggregation_mode",
                 "prompt_count",
                 "brand_present_count",
+                "feature_present_count",
+                "feature_visible_count",
                 "brand_absent_count",
                 "coverage_rate",
                 "coverage_status",
@@ -933,17 +1197,23 @@ def build_coverage(rows: pd.DataFrame, min_coverage_n: int, aggregation_mode: st
     ]
     for keys, group in matched.groupby(group_cols, dropna=False, sort=True):
         unit_group = aggregate_coverage_group(group, aggregation_mode)
+        if "feature_present" not in unit_group.columns:
+            unit_group["feature_present"] = False
+        if "feature_visible" not in unit_group.columns:
+            unit_group["feature_visible"] = unit_group["brand_present"] & unit_group["feature_present"]
         prompt_count = len(unit_group)
-        present = int(unit_group["brand_present"].sum())
-        missing = prompt_count - present
-        coverage_rate = present / prompt_count if prompt_count >= min_coverage_n else ""
+        brand_present = int(unit_group["brand_present"].sum())
+        feature_present = int(unit_group["feature_present"].sum()) if "feature_present" in unit_group.columns else 0
+        visible = int(unit_group["feature_visible"].sum()) if "feature_visible" in unit_group.columns else brand_present
+        missing = prompt_count - visible
+        coverage_rate = visible / prompt_count if prompt_count >= min_coverage_n else ""
         status = (
             "insufficient_data"
             if prompt_count < min_coverage_n
             else "covered"
-            if present == prompt_count
+            if visible == prompt_count
             else "missing"
-            if present == 0
+            if visible == 0
             else "partial"
         )
         records.append(
@@ -957,12 +1227,14 @@ def build_coverage(rows: pd.DataFrame, min_coverage_n: int, aggregation_mode: st
                 "cluster_label": keys[6],
                 "aggregation_mode": aggregation_mode,
                 "prompt_count": prompt_count,
-                "brand_present_count": present,
+                "brand_present_count": brand_present,
+                "feature_present_count": feature_present,
+                "feature_visible_count": visible,
                 "brand_absent_count": missing,
                 "coverage_rate": coverage_rate,
                 "coverage_status": status,
-                "present_prompt_ids": join_ids(unit_group[unit_group["brand_present"]]["prompt_id"]),
-                "missing_prompt_ids": join_ids(unit_group[~unit_group["brand_present"]]["prompt_id"]),
+                "present_prompt_ids": join_ids(unit_group[unit_group["feature_visible"]]["prompt_id"]),
+                "missing_prompt_ids": join_ids(unit_group[~unit_group["feature_visible"]]["prompt_id"]),
             }
         )
     return pd.DataFrame.from_records(records).sort_values(
@@ -1044,12 +1316,12 @@ def gap_severity(visibility_share: float, competitor_present: bool) -> str:
 def gap_reason(visibility_share: float, competitor_present: bool) -> str:
     status = visibility_status(visibility_share)
     if competitor_present and status == "missing":
-        return "Feature intent is present, competitors appear, and the target brand is missing."
+        return "Feature intent is present, competitors appear, and the target brand-feature evidence is missing."
     if competitor_present and status == "inconsistent":
-        return "Feature intent is present, competitors appear, and the target brand is inconsistently present."
+        return "Feature intent is present, competitors appear, and the target brand-feature evidence is inconsistent."
     if status in {"missing", "inconsistent"}:
-        return "Feature intent is present and the target brand is weak, but tracked competitors are not present."
-    return "The target brand has strong presence for this feature cluster."
+        return "Feature intent is present and the target brand-feature evidence is weak, but tracked competitors are not present."
+    return "The target brand and feature are both strongly represented for this cluster."
 
 
 def severity_signal(severity: str, category: str = "") -> str:
@@ -1073,6 +1345,51 @@ def dedupe_join(values: Iterable[object], limit: int | None = None) -> str:
     return ";".join(seen)
 
 
+def summarize_model_breakdown(rows: pd.DataFrame, limit: int = 5) -> str:
+    for candidate in ("engine", "model", "model_name", "model_id"):
+        if candidate in rows.columns:
+            counts = rows[candidate].fillna("").astype(str).value_counts()
+            return ";".join(
+                f"{name}:{count}"
+                for name, count in counts.items()
+                if name
+            )[:1000] if not counts.empty else ""
+    return ""
+
+
+def summarize_model_visibility(rows: pd.DataFrame, limit: int = 8) -> str:
+    model_col = None
+    for candidate in ("engine", "model", "model_name", "model_id"):
+        if candidate in rows.columns:
+            model_col = candidate
+            break
+    if model_col is None or "feature_visible" not in rows.columns:
+        return ""
+    chunks: list[str] = []
+    for model_name, group in rows.groupby(model_col, dropna=False, sort=True):
+        if not str(model_name).strip():
+            continue
+        rate = float(pd.to_numeric(group["feature_visible"], errors="coerce").fillna(0).mean())
+        chunks.append(f"{model_name}:{rate * 100:.0f}%")
+    return ";".join(chunks[:limit])
+
+
+def summarize_source_breakdown(rows: pd.DataFrame, limit: int = 5) -> str:
+    counts: dict[str, int] = {}
+    if "sources" in rows.columns:
+        for value in rows["sources"]:
+            for item in parse_sources_blob(value):
+                domain = str(item.get("domain") or "").strip()
+                if domain:
+                    counts[domain] = counts.get(domain, 0) + int(item.get("citationCount") or 0 or 1)
+    if "source_domains" in rows.columns:
+        for value in rows["source_domains"].fillna("").astype(str):
+            for domain in [part.strip() for part in value.split(";") if part.strip()]:
+                counts[domain] = counts.get(domain, 0) + 1
+    ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    return ";".join(f"{domain}:{count}" for domain, count in ordered[:limit])
+
+
 def build_feature_gap_overview(
     coverage: pd.DataFrame,
     rows: pd.DataFrame,
@@ -1087,19 +1404,35 @@ def build_feature_gap_overview(
     if target_coverage.empty:
         return pd.DataFrame()
 
+    query_rows = rows.drop_duplicates(
+        subset=[
+            column
+            for column in ("prompt_id", "mapped_feature_id", "cluster_id", "canonical_query")
+            if column in rows.columns
+        ]
+    )
     all_example_queries = (
-        rows.groupby(["mapped_feature_id", "cluster_id"], dropna=False)["canonical_query"]
+        query_rows.groupby(["mapped_feature_id", "cluster_id"], dropna=False)["canonical_query"]
         .apply(lambda values: dedupe_join(values, limit=5))
         .to_dict()
     )
     top_query_map = (
-        rows.groupby(["mapped_feature_id", "cluster_id"], dropna=False)["canonical_query"]
+        query_rows.groupby(["mapped_feature_id", "cluster_id"], dropna=False)["canonical_query"]
         .agg(lambda values: pd.Series(list(values)).value_counts().index[0])
         .to_dict()
     )
 
     overview_records: list[dict[str, object]] = []
     for _, target_row in target_coverage.iterrows():
+        cluster_rows = rows[
+            (rows["mapped_feature_id"] == target_row["mapped_feature_id"])
+            & (rows["cluster_id"] == target_row["cluster_id"])
+        ].copy()
+        target_cluster_rows = (
+            cluster_rows[cluster_rows["brand_id"].astype(str) == target_brand_id].copy()
+            if "brand_id" in cluster_rows.columns
+            else cluster_rows
+        )
         cluster_mask = (
             (coverage["mapped_feature_id"] == target_row["mapped_feature_id"])
             & (coverage["cluster_id"] == target_row["cluster_id"])
@@ -1142,6 +1475,8 @@ def build_feature_gap_overview(
                 "signal": severity_signal(severity, category),
                 "prompt_count": int(target_row["prompt_count"]),
                 "target_brand_present_count": int(target_row["brand_present_count"]),
+                "target_feature_present_count": int(target_row.get("feature_present_count", 0)),
+                "target_feature_visible_count": int(target_row.get("feature_visible_count", target_row["brand_present_count"])),
                 "target_brand_absent_count": int(target_row["brand_absent_count"]),
                 "top_competitor_brand_id": str(top_competitor["brand_id"]) if top_competitor is not None else "",
                 "top_competitor_brand_name": str(top_competitor["brand_name"]) if top_competitor is not None else "",
@@ -1149,6 +1484,9 @@ def build_feature_gap_overview(
                 "competitor_present_count": competitor_present_count,
                 "top_query": top_query_map.get(key, ""),
                 "example_queries": all_example_queries.get(key, ""),
+                "model_breakdown": summarize_model_breakdown(target_cluster_rows),
+                "model_visibility_breakdown": summarize_model_visibility(target_cluster_rows),
+                "top_source_domains": summarize_source_breakdown(target_cluster_rows),
                 "present_prompt_ids": target_row["present_prompt_ids"],
                 "missing_prompt_ids": target_row["missing_prompt_ids"],
             }
@@ -1182,12 +1520,30 @@ def build_feature_gap_details(
         example_queries = rows[
             (rows["mapped_feature_id"] == overview_row["mapped_feature_id"])
             & (rows["cluster_id"] == overview_row["cluster_id"])
-        ]["canonical_query"]
+        ].copy()
+        if "brand_id" in example_queries.columns:
+            example_queries = example_queries[example_queries["brand_id"].astype(str) == str(overview_row["target_brand_id"])].copy()
         detail_records.append(
             {
                 **overview_row.to_dict(),
                 "brand_comparison_json": json.dumps(brand_comparison, ensure_ascii=False),
-                "example_queries_json": json.dumps(list(dict.fromkeys(example_queries.tolist()))[:10], ensure_ascii=False),
+                "example_queries_json": json.dumps(list(dict.fromkeys(example_queries["canonical_query"].tolist()))[:10], ensure_ascii=False),
+                "model_breakdown_json": json.dumps(
+                    [
+                        {"model": item.split(":")[0], "count": int(item.split(":")[1])}
+                        for item in summarize_model_breakdown(example_queries, limit=20).split(";")
+                        if ":" in item
+                    ],
+                    ensure_ascii=False,
+                ),
+                "source_domains_json": json.dumps(
+                    [
+                        {"domain": item.split(":")[0], "count": int(item.split(":")[1])}
+                        for item in summarize_source_breakdown(example_queries, limit=20).split(";")
+                        if ":" in item
+                    ],
+                    ensure_ascii=False,
+                ),
             }
         )
     return pd.DataFrame.from_records(detail_records)
@@ -1251,6 +1607,8 @@ def write_outputs(
         "normalizer": config.normalizer,
         "brand_detector": config.brand_detector,
         "brand_detector_model": config.brand_detector_model,
+        "feature_evidence_mode": config.feature_evidence_mode,
+        "feature_evidence_model": config.feature_evidence_model,
         "cluster_threshold": config.cluster_threshold,
         "feature_threshold": config.feature_threshold,
         "min_cluster_size": config.min_cluster_size,

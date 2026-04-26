@@ -90,8 +90,16 @@ The React UI supports:
 - optional brands CSV override in Peec MCP mode
 - target-brand selection
 - mock vs real extraction/detection modes behind the settings button
-- ranked feature gap cards
-- detail panel with visibility, status, top competitor, top query, and examples
+- ranked feature gap cards with feature-cluster accents
+- results workspace with `Dashboard`, `History`, and `Features` tabs
+- saved runs with reload and post-run re-aggregation
+- feature evidence view that groups mapped queries under each feature
+- detail panel with visibility, traffic-light status, top competitor, example queries, model breakdown, source breakdown, and target-vs-competitor comparison
+
+TODO:
+
+- improve the settings UX; the current top-right button works for demos but should likely become a clearer settings surface
+- evaluate moving run settings into a dedicated settings page or route instead of a floating popover
 
 In Peec MCP mode, prompts do not need to be uploaded. The UI sends project ID
 and date range to the local API, which exports tracked Peec chats and runs the
@@ -153,6 +161,7 @@ The rest of the pipeline also keeps the same test/real split:
 
 - prompt normalizer: `openai_mock`, `heuristic`, `openai`
 - brand detector: `openai_mock`, `keyword`, `openai`
+- feature evidence detector: `openai_mock`, `keyword`, `openai`
 - embeddings: `hash` for speed, `bge-m3` for higher fidelity
 
 ## MCP Server

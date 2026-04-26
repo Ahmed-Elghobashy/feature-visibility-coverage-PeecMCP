@@ -35,9 +35,9 @@ class AggregationTests(unittest.TestCase):
     def test_prompt_aggregation_counts_repeated_prompt_once(self) -> None:
         group = pd.DataFrame(
             [
-                {"prompt_id": "p1", "engine": "chatgpt", "brand_present": False},
-                {"prompt_id": "p1", "engine": "chatgpt", "brand_present": True},
-                {"prompt_id": "p2", "engine": "chatgpt", "brand_present": False},
+                {"prompt_id": "p1", "engine": "chatgpt", "brand_present": False, "feature_present": True},
+                {"prompt_id": "p1", "engine": "chatgpt", "brand_present": True, "feature_present": True},
+                {"prompt_id": "p2", "engine": "chatgpt", "brand_present": False, "feature_present": True},
             ]
         )
 
@@ -49,8 +49,8 @@ class AggregationTests(unittest.TestCase):
     def test_prompt_model_aggregation_keeps_different_engines(self) -> None:
         group = pd.DataFrame(
             [
-                {"prompt_id": "p1", "engine": "chatgpt", "brand_present": True},
-                {"prompt_id": "p1", "engine": "gemini", "brand_present": False},
+                {"prompt_id": "p1", "engine": "chatgpt", "brand_present": True, "feature_present": True},
+                {"prompt_id": "p1", "engine": "gemini", "brand_present": False, "feature_present": True},
             ]
         )
 
@@ -92,12 +92,29 @@ class GapClassificationTests(unittest.TestCase):
         self.assertEqual(row["gap_category"], "strong_presence")
         self.assertEqual(row["gap_severity"], "low")
 
-    def rows(self, target_present: int, competitor_present: int) -> pd.DataFrame:
+    def test_brand_without_feature_evidence_does_not_count_as_visible(self) -> None:
+        coverage = build_coverage(self.rows(target_present=3, competitor_present=1, target_feature_present=0), 1, "response")
+        overview = build_feature_gap_overview(coverage, self.prompt_rows(), self.target_brand())
+        row = overview.iloc[0]
+
+        self.assertEqual(float(row["visibility_share"]), 0.0)
+        self.assertEqual(int(row["target_brand_present_count"]), 3)
+        self.assertEqual(int(row["target_feature_present_count"]), 0)
+        self.assertEqual(int(row["target_feature_visible_count"]), 0)
+
+    def rows(self, target_present: int, competitor_present: int, target_feature_present: int | None = None, competitor_feature_present: int | None = None) -> pd.DataFrame:
         records = []
-        for brand_id, brand_name, present_count in [
-            ("b1", "Peec AI", target_present),
-            ("b2", "Profound", competitor_present),
-        ]:
+        feature_counts = [
+            target_feature_present if target_feature_present is not None else target_present,
+            competitor_feature_present if competitor_feature_present is not None else competitor_present,
+        ]
+        for (brand_id, brand_name, present_count), feature_present_count in zip(
+            [
+                ("b1", "Peec AI", target_present),
+                ("b2", "Profound", competitor_present),
+            ],
+            feature_counts,
+        ):
             for idx in range(3):
                 records.append(
                     {
@@ -110,6 +127,7 @@ class GapClassificationTests(unittest.TestCase):
                         "cluster_label": "ai search visibility tools",
                         "prompt_id": f"p{idx + 1}",
                         "brand_present": idx < present_count,
+                        "feature_present": idx < int(feature_present_count),
                     }
                 )
         return pd.DataFrame.from_records(records)

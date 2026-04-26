@@ -89,6 +89,7 @@ def run_pipeline(
     output_dir: Path,
     normalizer: str,
     brand_detector: str,
+    feature_evidence_mode: str,
     embedding_backend: str,
     aggregation_mode: str,
 ) -> dict[str, Any]:
@@ -100,6 +101,7 @@ def run_pipeline(
         output_dir=output_dir,
         normalizer=normalizer,
         brand_detector=brand_detector,
+        feature_evidence_mode=feature_evidence_mode,
         embedding_backend=embedding_backend,
         aggregation_mode=aggregation_mode,
     )
@@ -114,6 +116,7 @@ def visibility_args(
     output_dir: Path,
     normalizer: str,
     brand_detector: str,
+    feature_evidence_mode: str,
     embedding_backend: str,
     aggregation_mode: str,
 ) -> list[str]:
@@ -132,6 +135,8 @@ def visibility_args(
         normalizer,
         "--brand-detector",
         brand_detector,
+        "--feature-evidence-mode",
+        feature_evidence_mode,
         "--embedding-backend",
         embedding_backend,
         "--aggregation-mode",
@@ -169,6 +174,7 @@ def run_pipeline_capture(
     output_dir: Path,
     normalizer: str,
     brand_detector: str,
+    feature_evidence_mode: str,
     embedding_backend: str,
     aggregation_mode: str,
 ) -> dict[str, Any]:
@@ -180,6 +186,7 @@ def run_pipeline_capture(
         output_dir=output_dir,
         normalizer=normalizer,
         brand_detector=brand_detector,
+        feature_evidence_mode=feature_evidence_mode,
         embedding_backend=embedding_backend,
         aggregation_mode=aggregation_mode,
     )
@@ -224,6 +231,7 @@ def run_pipeline_stream(
     output_dir: Path,
     normalizer: str,
     brand_detector: str,
+    feature_evidence_mode: str,
     embedding_backend: str,
     aggregation_mode: str,
 ):
@@ -235,6 +243,7 @@ def run_pipeline_stream(
         output_dir=output_dir,
         normalizer=normalizer,
         brand_detector=brand_detector,
+        feature_evidence_mode=feature_evidence_mode,
         embedding_backend=embedding_backend,
         aggregation_mode=aggregation_mode,
     )
@@ -446,6 +455,7 @@ async def analyze_sample(request) -> JSONResponse:
             output_dir=output_dir,
             normalizer=str(body.get("normalizer") or "openai_mock"),
             brand_detector=str(body.get("brand_detector") or "openai_mock"),
+            feature_evidence_mode=str(body.get("feature_evidence_mode") or "openai_mock"),
             embedding_backend=str(body.get("embedding_backend") or "hash"),
             aggregation_mode=str(body.get("aggregation_mode") or "prompt"),
         )
@@ -495,6 +505,7 @@ async def analyze_upload(request) -> JSONResponse:
             output_dir=workdir / "outputs",
             normalizer=str(form.get("normalizer") or "openai_mock"),
             brand_detector=str(form.get("brand_detector") or "openai_mock"),
+            feature_evidence_mode=str(form.get("feature_evidence_mode") or "openai_mock"),
             embedding_backend=str(form.get("embedding_backend") or "hash"),
             aggregation_mode=str(form.get("aggregation_mode") or "prompt"),
         )
@@ -579,6 +590,7 @@ async def analyze_peec(request) -> JSONResponse:
             output_dir=workdir / "outputs",
             normalizer=str(form.get("normalizer") or "openai_mock"),
             brand_detector=str(form.get("brand_detector") or "openai_mock"),
+            feature_evidence_mode=str(form.get("feature_evidence_mode") or "openai_mock"),
             embedding_backend=str(form.get("embedding_backend") or "hash"),
             aggregation_mode=str(form.get("aggregation_mode") or "prompt"),
         )
@@ -662,6 +674,7 @@ async def analyze_upload_stream(request) -> StreamingResponse:
                 output_dir=workdir / "outputs",
                 normalizer=str(form.get("normalizer") or "openai_mock"),
                 brand_detector=str(form.get("brand_detector") or "openai_mock"),
+                feature_evidence_mode=str(form.get("feature_evidence_mode") or "openai_mock"),
                 embedding_backend=str(form.get("embedding_backend") or "hash"),
                 aggregation_mode=str(form.get("aggregation_mode") or "prompt"),
             )
@@ -804,6 +817,7 @@ async def analyze_peec_stream(request) -> StreamingResponse:
                 output_dir=workdir / "outputs",
                 normalizer=str(form.get("normalizer") or "openai_mock"),
                 brand_detector=str(form.get("brand_detector") or "openai_mock"),
+                feature_evidence_mode=str(form.get("feature_evidence_mode") or "openai_mock"),
                 embedding_backend=str(form.get("embedding_backend") or "hash"),
                 aggregation_mode=str(form.get("aggregation_mode") or "prompt"),
             )
