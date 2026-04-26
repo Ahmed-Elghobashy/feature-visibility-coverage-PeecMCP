@@ -150,6 +150,21 @@ def run_peec_export(
     }
 
 
+def summarize_peec_export_error(stdout: str, stderr: str) -> str:
+    text = (stderr or stdout).strip()
+    if not text:
+        return "Peec export failed."
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for line in reversed(lines):
+        if line.lower().startswith("error:"):
+            return line.removeprefix("error:").strip()
+    for line in reversed(lines):
+        if "Peec MCP" in line or "Unauthorized" in line or "temporarily unavailable" in line:
+            return line
+    return lines[-1]
+
+
 def first_brand_name(brands_csv: Path) -> str:
     names = brand_names(brands_csv)
     if names:
@@ -325,7 +340,13 @@ async def analyze_peec(request) -> JSONResponse:
             limit=int(str(form.get("limit") or "10000")),
         )
         if not export_result["ok"]:
-            return JSONResponse({"ok": False, "error": export_result["stderr"] or export_result["stdout"]}, status_code=500)
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": summarize_peec_export_error(export_result["stdout"], export_result["stderr"]),
+                },
+                status_code=500,
+            )
         if not prompts_path.exists() or prompts_path.stat().st_size == 0:
             return JSONResponse(
                 {"ok": False, "error": "Peec export returned no prompt rows for the selected filters."},
