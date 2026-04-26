@@ -126,8 +126,6 @@ def parse_args() -> ExportConfig:
     if not args.list_projects and not args.list_tools:
         if not args.start_date or not args.end_date:
             parser.error("--start-date and --end-date are required unless listing.")
-        if not args.project and not args.project_id:
-            parser.error("--project or --project-id is required unless listing.")
 
     return ExportConfig(
         project=args.project,
@@ -464,11 +462,12 @@ def table_from_result(result: dict[str, Any]) -> pd.DataFrame:
 def resolve_project_id(projects: pd.DataFrame, config: ExportConfig) -> str:
     if config.project_id:
         return config.project_id
-    assert config.project
     if projects.empty:
         raise RuntimeError("Peec MCP returned no projects.")
     if "id" not in projects.columns or "name" not in projects.columns:
         raise RuntimeError(f"Unexpected list_projects columns: {list(projects.columns)}")
+    if not config.project:
+        return str(projects.iloc[0]["id"])
 
     needle = config.project.casefold()
     matches = projects[projects["name"].astype(str).str.casefold().str.contains(needle, regex=False)]

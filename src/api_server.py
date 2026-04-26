@@ -122,8 +122,6 @@ def run_peec_export(
     args = [
         sys.executable,
         str(PEEC_EXPORT_SCRIPT),
-        "--project-id",
-        project_id,
         "--start-date",
         start_date,
         "--end-date",
@@ -135,6 +133,8 @@ def run_peec_export(
         "--connect-timeout",
         "30",
     ]
+    if project_id:
+        args.extend(["--project-id", project_id])
     result = subprocess.run(
         args,
         cwd=ROOT,
@@ -304,8 +304,8 @@ async def analyze_peec(request) -> JSONResponse:
     start_date = str(form.get("start_date") or "").strip()
     end_date = str(form.get("end_date") or "").strip()
     target_brand = str(form.get("target_brand") or "").strip()
-    if not project_id or not start_date or not end_date:
-        return JSONResponse({"ok": False, "error": "project_id, start_date, and end_date are required."}, status_code=400)
+    if not start_date or not end_date:
+        return JSONResponse({"ok": False, "error": "start_date and end_date are required."}, status_code=400)
     if not target_brand:
         return JSONResponse({"ok": False, "error": "target_brand is required for Peec MCP runs."}, status_code=400)
 

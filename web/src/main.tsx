@@ -253,7 +253,7 @@ function App() {
   const featureCount = new Set(sortedOverview.map((row) => row.mapped_feature_name)).size;
   const visibleRows = resultsMode === "gaps" ? sortedOverview.filter((row) => row.is_feature_visibility_gap) : sortedOverview;
   const selected = visibleRows[Math.min(selectedIndex, Math.max(visibleRows.length - 1, 0))];
-  const peecReady = Boolean(projectId && startDate && endDate && targetBrand && featureFile);
+  const peecReady = Boolean(startDate && endDate && targetBrand && featureFile);
   const csvReady = Boolean(promptsCsv && brandsCsv && targetBrand && featureFile);
   const uploadReady = dataSource === "peec" ? peecReady : csvReady;
   const realModeSelected = normalizer === "openai" || brandDetector === "openai" || featureMode === "openai";
@@ -388,8 +388,12 @@ function App() {
           {dataSource === "peec" ? (
             <div className="compact-fields">
               <label className="field">
-                <span>Peec project ID</span>
-                <input value={projectId} onChange={(event) => setProjectId(event.target.value)} />
+                <span>Peec project ID (optional)</span>
+                <input
+                  value={projectId}
+                  placeholder="Defaults to first accessible Peec project"
+                  onChange={(event) => setProjectId(event.target.value)}
+                />
               </label>
               <div className="two-col">
                 <label className="field">
@@ -410,7 +414,7 @@ function App() {
           )}
           <FilePicker label="Feature CSV or PDF" accept=".csv,.pdf" file={featureFile} onChange={setFeatureFile} />
           {dataSource === "peec" ? <FilePicker label="Brands CSV override" accept=".csv" file={brandsCsv} onChange={setBrandsCsv} /> : null}
-          {dataSource === "peec" ? <div className="notice">Prompts and responses come from Peec MCP. Brand CSV is optional.</div> : null}
+          {dataSource === "peec" ? <div className="notice">Prompts and responses come from Peec MCP. If project ID is empty, the first accessible Peec project is used. Brand CSV is optional.</div> : null}
         </section>
 
         <div className="actions">
@@ -458,7 +462,7 @@ function App() {
 
         {error ? <div className="error-banner">{error}</div> : null}
         {!uploadReady && !result ? (
-          <div className="setup-banner">{dataSource === "peec" ? "Enter Peec project details and upload one feature CSV or PDF, or run the built-in sample." : "Upload prompts, brands, and one feature CSV or PDF, or run the built-in sample."}</div>
+          <div className="setup-banner">{dataSource === "peec" ? "Choose a date range and upload one feature CSV or PDF. Project ID is optional, or run the built-in sample." : "Upload prompts, brands, and one feature CSV or PDF, or run the built-in sample."}</div>
         ) : null}
 
         <section className="kpi-grid">
