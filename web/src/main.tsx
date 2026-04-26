@@ -223,8 +223,18 @@ function BreakdownChart({ title, items, suffix = "" }: { title: string; items: B
 
 function trafficTone(value: string | undefined) {
   const normalized = String(value || "").toLowerCase();
-  if (normalized.includes("missing") || normalized.includes("inconsistent") || normalized.includes("negative")) return "bad";
-  if (normalized.includes("partial") || normalized.includes("medium") || normalized.includes("investigat")) return "mid";
+  if (
+    normalized.includes("missing")
+    || normalized.includes("inconsistent")
+    || normalized.includes("negative")
+    || normalized.includes("weak")
+  ) return "bad";
+  if (
+    normalized.includes("partial")
+    || normalized.includes("medium")
+    || normalized.includes("investigat")
+    || normalized.includes("worth investigating")
+  ) return "mid";
   if (normalized.includes("strong") || normalized.includes("good") || normalized.includes("visible")) return "good";
   return "neutral";
 }
@@ -447,6 +457,7 @@ function App() {
     () => parseBreakdown(selected?.top_source_domains),
     [selected],
   );
+  const selectedRunSummary = useMemo(() => savedRuns.find((run) => run.run_id === selectedRunId) || null, [savedRuns, selectedRunId]);
   const selectedComparison = useMemo(() => {
     if (!selected) return [] as BreakdownItem[];
     const items: BreakdownItem[] = [
@@ -487,7 +498,6 @@ function App() {
       }))
       .sort((left, right) => right.queries.length - left.queries.length || left.featureName.localeCompare(right.featureName));
   }, [runMappings]);
-  const selectedRunSummary = useMemo(() => savedRuns.find((run) => run.run_id === selectedRunId) || null, [savedRuns, selectedRunId]);
   const peecReady = Boolean(startDate && endDate && targetBrand && featureFile);
   const csvReady = Boolean(promptsCsv && brandsCsv && targetBrand && featureFile);
   const uploadReady = dataSource === "peec" ? peecReady : csvReady;
@@ -999,30 +1009,6 @@ function App() {
           <div className="kpi"><span>Rows analyzed</span><strong>{result?.metadata?.brand_count ? String(result.metadata.brand_count) : "-"}</strong></div>
         </section>
 
-        {runLogs.length ? (
-          <section className="run-log-panel">
-            <div className="section-heading">
-              <div>
-                <h2>Run buffer</h2>
-                <p>{loading ? "Live stage updates" : "Last run stages"}</p>
-              </div>
-            </div>
-            <div className="run-log-list">
-              {runLogs.map((entry) => (
-                <div key={entry.id} className="run-log-entry">
-                  <div className="run-log-meta">
-                    <span className={`severity severity-${entry.status === "failed" ? "high" : entry.status === "completed" ? "low" : "medium"}`}>
-                      {entry.status}
-                    </span>
-                    <strong>{entry.stage}</strong>
-                    {entry.durationMs !== undefined ? <span>{entry.durationMs} ms</span> : null}
-                  </div>
-                  <p>{entry.message}</p>
-                </div>
-              ))}
-            </div>
-          </section>
-        ) : null}
 
           <div className="content-grid">
             <section className="results-column">
@@ -1042,8 +1028,8 @@ function App() {
               {loading ? (
                 <div className="empty-state">
                   <Loader2 className="spin" size={28} />
-                  Run buffer
-                  <small>{activeStage || "Live stage updates"}</small>
+                  Analyzing
+                  <small>{activeStage || "Processing current run"}</small>
                 </div>
               ) : visibleRows.length ? (
                 <div className="gap-list">
