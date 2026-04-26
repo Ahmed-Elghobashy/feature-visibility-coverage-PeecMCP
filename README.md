@@ -2,7 +2,7 @@
 
 Feature Visibility Gaps shows where a brand is missing from AI answers for product-feature demand.
 
-It uses Peec data as the observation layer, then adds a feature-level analysis layer on top.
+It extends Peec by taking Peec prompt and response data and turning it into feature-level visibility diagnostics.
 
 ## What It Does
 
@@ -37,11 +37,11 @@ The main output is a feature visibility dashboard with:
 - saved run history
 - feature evidence view
 
-## Peec vs This Product
+## How It Extends Peec
 
 Peec already helps collect prompts, responses, models, sources, and brand mentions.
 
-This product adds the feature analysis step:
+This product extends that workflow by adding the feature analysis step:
 
 - group demand by product feature
 - measure whether the brand is visible for that feature demand
@@ -49,23 +49,21 @@ This product adds the feature analysis step:
 
 ## Screenshots
 
-Add screenshots here before submission.
-
-### Setup
-
-`[screenshot placeholder]`
-
 ### Dashboard
 
-`[screenshot placeholder]`
+![Dashboard overview](docs/screenshots/dashboard-overview.png)
 
-### Features
+### Ranked Gaps
 
-`[screenshot placeholder]`
+![Ranked gaps](docs/screenshots/dashboard-cards.png)
 
-### History
+### Detail View
 
-`[screenshot placeholder]`
+![Detail view](docs/screenshots/detail-view.png)
+
+### Features View
+
+![Features view](docs/screenshots/features-view.png)
 
 ## Run Locally
 
@@ -105,4 +103,3 @@ The UI supports:
 - `src/api_server.py` - local API
 - `src/visibility_mvp.py` - feature visibility pipeline
 - `src/peec_mcp_export.py` - Peec export layer
-
