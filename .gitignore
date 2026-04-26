@@ -3,6 +3,8 @@
 .peec_mcp_tokens.json
 __pycache__/
 *.pyc
+.DS_Store
+.cache/
 web/node_modules/
 web/dist/
 outputs/

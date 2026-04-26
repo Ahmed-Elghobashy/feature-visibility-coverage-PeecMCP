@@ -31,6 +31,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from feature_extraction import extract_features_from_pdf  # noqa: E402
+from run_store import load_run_mappings, load_run_result, list_runs, persist_run, reaggregate_saved_run  # noqa: E402
 
 
 def load_dotenv(path: Path) -> None:
@@ -448,6 +449,18 @@ async def analyze_sample(request) -> JSONResponse:
             embedding_backend=str(body.get("embedding_backend") or "hash"),
             aggregation_mode=str(body.get("aggregation_mode") or "prompt"),
         )
+        if result["ok"]:
+            manifest = persist_run(
+                source="sample",
+                prompts_csv=ROOT / "data" / "sample_prompts.csv",
+                features_csv=ROOT / "data" / "demo_features.csv",
+                brands_csv=ROOT / "data" / "demo_brands.csv",
+                output_dir=output_dir,
+                target_brand=str(body.get("target_brand") or "Peec AI"),
+                aggregation_mode=str(body.get("aggregation_mode") or "prompt"),
+            )
+            result["run_id"] = manifest["run_id"]
+            result["manifest"] = manifest
         return JSONResponse(result, status_code=200 if result["ok"] else 500)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
@@ -485,6 +498,18 @@ async def analyze_upload(request) -> JSONResponse:
             embedding_backend=str(form.get("embedding_backend") or "hash"),
             aggregation_mode=str(form.get("aggregation_mode") or "prompt"),
         )
+        if result["ok"]:
+            manifest = persist_run(
+                source="csv",
+                prompts_csv=prompts_path,
+                features_csv=features_path,
+                brands_csv=brands_path,
+                output_dir=workdir / "outputs",
+                target_brand=target_brand,
+                aggregation_mode=str(form.get("aggregation_mode") or "prompt"),
+            )
+            result["run_id"] = manifest["run_id"]
+            result["manifest"] = manifest
         result["extracted_features"] = extracted_features
         result["extracted_text_preview"] = extracted_text[:12000]
         return JSONResponse(result, status_code=200 if result["ok"] else 500)
@@ -557,6 +582,24 @@ async def analyze_peec(request) -> JSONResponse:
             embedding_backend=str(form.get("embedding_backend") or "hash"),
             aggregation_mode=str(form.get("aggregation_mode") or "prompt"),
         )
+        if result["ok"]:
+            manifest = persist_run(
+                source="peec",
+                prompts_csv=prompts_path,
+                features_csv=features_path,
+                brands_csv=brands_path,
+                output_dir=workdir / "outputs",
+                target_brand=target_brand,
+                aggregation_mode=str(form.get("aggregation_mode") or "prompt"),
+                extra_meta={
+                    "project_id": project_id,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "peec_limit": int(str(form.get("limit") or "250")),
+                },
+            )
+            result["run_id"] = manifest["run_id"]
+            result["manifest"] = manifest
         result["peec_export_stdout"] = export_result["stdout"]
         result["peec_export_stderr"] = export_result["stderr"]
         result["extracted_features"] = extracted_features
@@ -648,6 +691,17 @@ async def analyze_upload_stream(request) -> StreamingResponse:
                 "summary": read_text(workdir / "outputs" / "feature_gap_summary.md"),
                 "metadata": metadata,
             }
+            manifest = persist_run(
+                source="csv",
+                prompts_csv=prompts_path,
+                features_csv=features_path,
+                brands_csv=brands_path,
+                output_dir=workdir / "outputs",
+                target_brand=target_brand,
+                aggregation_mode=str(form.get("aggregation_mode") or "prompt"),
+            )
+            result["run_id"] = manifest["run_id"]
+            result["manifest"] = manifest
             result["extracted_features"] = extracted_features
             result["extracted_text_preview"] = extracted_text[:12000]
             yield progress_event("result", result=result)
@@ -779,6 +833,23 @@ async def analyze_peec_stream(request) -> StreamingResponse:
                 "summary": read_text(workdir / "outputs" / "feature_gap_summary.md"),
                 "metadata": metadata,
             }
+            manifest = persist_run(
+                source="peec",
+                prompts_csv=prompts_path,
+                features_csv=features_path,
+                brands_csv=brands_path,
+                output_dir=workdir / "outputs",
+                target_brand=target_brand,
+                aggregation_mode=str(form.get("aggregation_mode") or "prompt"),
+                extra_meta={
+                    "project_id": project_id,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "peec_limit": int(str(form.get("limit") or "250")),
+                },
+            )
+            result["run_id"] = manifest["run_id"]
+            result["manifest"] = manifest
             result["peec_export_stdout"] = export_result["stdout"]
             result["peec_export_stderr"] = export_result["stderr"]
             result["extracted_features"] = extracted_features
@@ -790,6 +861,44 @@ async def analyze_peec_stream(request) -> StreamingResponse:
     return StreamingResponse(generate(), media_type="application/x-ndjson")
 
 
+async def runs_index(_request) -> JSONResponse:
+    return JSONResponse({"ok": True, "runs": list_runs()})
+
+
+async def run_detail(request) -> JSONResponse:
+    run_id_value = str(request.path_params["run_id"])
+    try:
+        result = load_run_result(run_id_value)
+    except FileNotFoundError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=404)
+    return JSONResponse(result)
+
+
+async def run_mappings(request) -> JSONResponse:
+    run_id_value = str(request.path_params["run_id"])
+    feature_id = str(request.query_params.get("feature_id") or "")
+    cluster_id = str(request.query_params.get("cluster_id") or "")
+    limit = int(str(request.query_params.get("limit") or "200"))
+    try:
+        mappings = load_run_mappings(run_id_value, feature_id=feature_id, cluster_id=cluster_id, limit=limit)
+    except FileNotFoundError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=404)
+    return JSONResponse({"ok": True, "run_id": run_id_value, "mappings": mappings})
+
+
+async def run_reaggregate(request) -> JSONResponse:
+    run_id_value = str(request.path_params["run_id"])
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    aggregation_mode = str(body.get("aggregation_mode") or "prompt")
+    try:
+        manifest = reaggregate_saved_run(run_id_value, aggregation_mode)
+        result = load_run_result(str(manifest["run_id"]))
+    except FileNotFoundError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=404)
+    result["run_id"] = manifest["run_id"]
+    return JSONResponse(result)
+
+
 routes = [
     Route("/api/health", health, methods=["GET"]),
     Route("/api/analyze-sample", analyze_sample, methods=["POST"]),
@@ -797,6 +906,10 @@ routes = [
     Route("/api/analyze-peec", analyze_peec, methods=["POST"]),
     Route("/api/analyze-stream", analyze_upload_stream, methods=["POST"]),
     Route("/api/analyze-peec-stream", analyze_peec_stream, methods=["POST"]),
+    Route("/api/runs", runs_index, methods=["GET"]),
+    Route("/api/runs/{run_id}", run_detail, methods=["GET"]),
+    Route("/api/runs/{run_id}/mappings", run_mappings, methods=["GET"]),
+    Route("/api/runs/{run_id}/reaggregate", run_reaggregate, methods=["POST"]),
 ]
 
 app = Starlette(debug=False, routes=routes)

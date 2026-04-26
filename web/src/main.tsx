@@ -48,6 +48,30 @@ type ApiResult = {
   metadata: Record<string, unknown>;
   extracted_features?: Record<string, unknown>[];
   extracted_text_preview?: string;
+  run_id?: string;
+  manifest?: Record<string, unknown>;
+};
+
+type RunSummary = {
+  run_id: string;
+  created_at: string;
+  source: string;
+  target_brand: string;
+  aggregation_mode: string;
+  prompt_rows: number;
+  overview_rows: number;
+};
+
+type MappingRow = {
+  prompt_id: string;
+  original_prompt?: string;
+  canonical_query?: string;
+  cluster_id?: string;
+  cluster_label?: string;
+  mapped_feature_id?: string;
+  mapped_feature_name?: string;
+  feature_similarity?: number;
+  brand_present?: boolean;
 };
 
 type ProgressEvent = {
@@ -260,6 +284,10 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [runLogs, setRunLogs] = useState<RunLogEntry[]>([]);
   const [activeStage, setActiveStage] = useState("");
+  const [savedRuns, setSavedRuns] = useState<RunSummary[]>([]);
+  const [selectedRunId, setSelectedRunId] = useState("");
+  const [mappings, setMappings] = useState<MappingRow[]>([]);
+  const [mappingLoading, setMappingLoading] = useState(false);
 
   const sortedOverview = useMemo(() => {
     const rows = [...(result?.overview ?? [])];
@@ -393,6 +421,16 @@ function App() {
     };
   }, []);
 
+  async function refreshRuns() {
+    const response = await fetch("/api/runs");
+    const data = (await response.json()) as { ok: boolean; runs: RunSummary[] };
+    if (data.ok) setSavedRuns(data.runs);
+  }
+
+  useEffect(() => {
+    refreshRuns().catch(() => {});
+  }, []);
+
   useEffect(() => {
     if (!brandsCsv) {
       setBrandOptions([]);
@@ -430,6 +468,8 @@ function App() {
       if (!response.ok || !data.ok) throw new Error(data.error || data.stderr || "Sample analysis failed.");
       setResult(data);
       setResultSource("sample");
+      if (data.run_id) setSelectedRunId(data.run_id);
+      await refreshRuns();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Sample analysis failed.");
     } finally {
@@ -476,12 +516,83 @@ function App() {
       const data = await consumeStream(response);
       setResult(data);
       setResultSource(dataSource);
+      if (data.run_id) setSelectedRunId(data.run_id);
+      await refreshRuns();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Analysis failed.");
     } finally {
       setLoading(false);
     }
   }
+
+  async function openSavedRun(runId: string) {
+    setLoading(true);
+    setError("");
+    setSelectedIndex(0);
+    try {
+      const response = await fetch(`/api/runs/${runId}`);
+      const data = (await response.json()) as ApiResult;
+      if (!response.ok || !data.ok) throw new Error(data.error || "Failed to load saved run.");
+      setResult(data);
+      setSelectedRunId(runId);
+      setResultSource("csv");
+      setRunLogs([]);
+      setActiveStage("Loaded saved run");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load saved run.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function reaggregateRun() {
+    if (!selectedRunId) return;
+    setLoading(true);
+    setError("");
+    setRunLogs([]);
+    setActiveStage("Re-aggregating saved run");
+    try {
+      const response = await fetch(`/api/runs/${selectedRunId}/reaggregate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ aggregation_mode: aggregationMode }),
+      });
+      const data = (await response.json()) as ApiResult;
+      if (!response.ok || !data.ok) throw new Error(data.error || "Re-aggregation failed.");
+      setResult(data);
+      if (data.run_id) setSelectedRunId(data.run_id);
+      await refreshRuns();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Re-aggregation failed.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!selectedRunId || !selected) {
+      setMappings([]);
+      return;
+    }
+    let cancelled = false;
+    setMappingLoading(true);
+    fetch(
+      `/api/runs/${selectedRunId}/mappings?feature_id=${encodeURIComponent(selected.mapped_feature_id)}&cluster_id=${encodeURIComponent(selected.cluster_id)}&limit=100`,
+    )
+      .then((response) => response.json())
+      .then((data: { ok: boolean; mappings: MappingRow[] }) => {
+        if (!cancelled && data.ok) setMappings(data.mappings);
+      })
+      .catch(() => {
+        if (!cancelled) setMappings([]);
+      })
+      .finally(() => {
+        if (!cancelled) setMappingLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedRunId, selected?.mapped_feature_id, selected?.cluster_id]);
 
   return (
     <main className="app-shell">
@@ -605,6 +716,34 @@ function App() {
           <div className="kpi"><span>Rows analyzed</span><strong>{result?.metadata?.brand_count ? String(result.metadata.brand_count) : "-"}</strong></div>
         </section>
 
+        <section className="saved-runs-panel">
+          <div className="section-heading">
+            <div>
+              <h2>Saved runs</h2>
+              <p>{savedRuns.length} persisted runs</p>
+            </div>
+            {selectedRunId ? (
+              <button className="button button-secondary" onClick={reaggregateRun} disabled={loading}>
+                Re-aggregate
+              </button>
+            ) : null}
+          </div>
+          <div className="saved-runs-list">
+            {savedRuns.slice(0, 8).map((run) => (
+              <button
+                key={run.run_id}
+                className={`saved-run-card ${run.run_id === selectedRunId ? "selected" : ""}`}
+                onClick={() => openSavedRun(run.run_id)}
+              >
+                <strong>{run.source}</strong>
+                <span>{run.target_brand}</span>
+                <span>{run.aggregation_mode}</span>
+                <span>{run.prompt_rows} rows</span>
+              </button>
+            ))}
+          </div>
+        </section>
+
         {runLogs.length ? (
           <section className="run-log-panel">
             <div className="section-heading">
@@ -646,7 +785,11 @@ function App() {
               </div>
             </div>
             {loading ? (
-              <div className="empty-state"><Loader2 className="spin" size={28} />Running analysis</div>
+              <div className="empty-state">
+                <Loader2 className="spin" size={28} />
+                Run buffer
+                <small>{activeStage || "Live stage updates"}</small>
+              </div>
             ) : visibleRows.length ? (
               <div className="gap-list">
                 {visibleRows.map((row, index) => (
@@ -686,6 +829,24 @@ function App() {
                       <li key={query}>{query}</li>
                     ))}
                   </ul>
+                </div>
+                <div>
+                  <p className="eyebrow">Saved mappings</p>
+                  {mappingLoading ? (
+                    <p>Loading mappings...</p>
+                  ) : mappings.length ? (
+                    <ul className="query-list">
+                      {mappings.slice(0, 8).map((row) => (
+                        <li key={`${row.prompt_id}-${row.canonical_query}`}>
+                          <strong>{row.canonical_query || row.original_prompt || row.prompt_id}</strong>
+                          <br />
+                          {row.original_prompt || row.prompt_id}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p>No saved mappings for this feature cluster.</p>
+                  )}
                 </div>
               </div>
             ) : (

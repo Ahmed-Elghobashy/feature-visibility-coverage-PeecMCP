@@ -163,7 +163,16 @@ p {
 .two-col {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
   gap: 10px;
+}
+
+.two-col .field {
+  margin-top: 0;
+}
+
+.compact-fields .two-col {
+  grid-template-columns: 1fr;
 }
 
 .file-picker {
@@ -444,6 +453,42 @@ p {
   padding: 16px;
 }
 
+.saved-runs-panel {
+  margin-bottom: 18px;
+  border: 1px solid #e3d6fb;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 16px;
+}
+
+.saved-runs-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+}
+
+.saved-run-card {
+  display: grid;
+  gap: 4px;
+  text-align: left;
+  border: 1px solid #eadffc;
+  border-radius: 8px;
+  background: #fcfaff;
+  padding: 12px;
+  color: inherit;
+}
+
+.saved-run-card.selected {
+  border-color: #7c3aed;
+  box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.13);
+}
+
+.saved-run-card span {
+  color: #76698a;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .run-log-list {
   display: grid;
   gap: 10px;
@@ -700,6 +745,12 @@ p {
   background: #fdfcff;
   text-align: center;
   padding: 24px;
+}
+
+.empty-state small {
+  color: #76698a;
+  font-size: 13px;
+  font-weight: 700;
 }
 
 .spin {
