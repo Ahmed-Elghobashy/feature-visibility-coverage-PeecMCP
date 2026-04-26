@@ -137,7 +137,7 @@ def run_peec_export(
     start_date: str,
     end_date: str,
     output_csv: Path,
-    limit: int = 10000,
+    limit: int = 250,
 ) -> dict[str, Any]:
     args = [
         sys.executable,
@@ -356,7 +356,7 @@ async def analyze_peec(request) -> JSONResponse:
             start_date=start_date,
             end_date=end_date,
             output_csv=prompts_path,
-            limit=int(str(form.get("limit") or "10000")),
+            limit=int(str(form.get("limit") or "250")),
         )
         if not export_result["ok"]:
             return JSONResponse(
@@ -509,7 +509,7 @@ async def analyze_peec_stream(request) -> StreamingResponse:
                 start_date=start_date,
                 end_date=end_date,
                 output_csv=prompts_path,
-                limit=int(str(form.get("limit") or "10000")),
+                limit=int(str(form.get("limit") or "250")),
             )
             if not export_result["ok"]:
                 yield progress_event(

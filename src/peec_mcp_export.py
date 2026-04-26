@@ -68,6 +68,7 @@ class ExportConfig:
     list_projects: bool
     list_tools: bool
     connect_timeout: float
+    chat_detail_concurrency: int
 
 
 def main() -> int:
@@ -102,6 +103,12 @@ def parse_args() -> ExportConfig:
         help="Local OAuth token storage path.",
     )
     parser.add_argument("--limit", type=int, default=10000, help="Max chats to export.")
+    parser.add_argument(
+        "--chat-detail-concurrency",
+        type=int,
+        default=12,
+        help="Concurrent get_chat requests after list_chats.",
+    )
     parser.add_argument("--topic-id", help="Only prompts from this topic ID.")
     parser.add_argument("--tag-id", help="Only prompts with this tag ID.")
     parser.add_argument("--model-id", help="Only chats from this Peec model ID.")
@@ -144,6 +151,7 @@ def parse_args() -> ExportConfig:
         list_projects=args.list_projects,
         list_tools=args.list_tools,
         connect_timeout=args.connect_timeout,
+        chat_detail_concurrency=max(1, args.chat_detail_concurrency),
     )
 
 
@@ -208,15 +216,14 @@ async def export_with_token(config: ExportConfig, access_token: str) -> None:
                 for _, row in prompts.iterrows()
             }
 
-            records: list[dict[str, Any]] = []
-            for _, chat in chat_rows.iterrows():
-                chat_id = str(chat["id"])
-                chat_detail = await call_tool(
-                    session,
-                    "get_chat",
-                    {"project_id": project_id, "chat_id": chat_id},
-                )
-                records.append(flatten_chat(chat, chat_detail, prompt_by_id, model_names))
+            records = await fetch_chat_records(
+                session=session,
+                project_id=project_id,
+                chat_rows=chat_rows,
+                prompt_by_id=prompt_by_id,
+                model_names=model_names,
+                concurrency=config.chat_detail_concurrency,
+            )
 
             config.output.parent.mkdir(parents=True, exist_ok=True)
             pd.DataFrame.from_records(records).to_csv(
@@ -225,6 +232,42 @@ async def export_with_token(config: ExportConfig, access_token: str) -> None:
                 quoting=csv.QUOTE_MINIMAL,
             )
             print(f"Wrote {len(records)} Peec chat rows to {config.output}")
+
+
+async def fetch_chat_records(
+    *,
+    session: ClientSession,
+    project_id: str,
+    chat_rows: pd.DataFrame,
+    prompt_by_id: dict[str, pd.Series],
+    model_names: dict[Any, Any],
+    concurrency: int,
+) -> list[dict[str, Any]]:
+    semaphore = asyncio.Semaphore(concurrency)
+    rows = [row for _, row in chat_rows.iterrows()]
+    total = len(rows)
+    completed = 0
+    next_progress = min(50, total) if total else 0
+
+    async def fetch_one(chat_row: pd.Series) -> dict[str, Any]:
+        chat_id = str(chat_row["id"])
+        async with semaphore:
+            chat_detail = await call_tool(
+                session,
+                "get_chat",
+                {"project_id": project_id, "chat_id": chat_id},
+            )
+        return flatten_chat(chat_row, chat_detail, prompt_by_id, model_names)
+
+    tasks = [asyncio.create_task(fetch_one(row)) for row in rows]
+    records: list[dict[str, Any]] = []
+    for task in asyncio.as_completed(tasks):
+        records.append(await task)
+        completed += 1
+        if total and completed >= next_progress:
+            print(f"Fetched {completed}/{total} chat details ...", flush=True)
+            next_progress += 50
+    return records
 
 
 async def get_access_token(config: ExportConfig, force_reauth: bool = False) -> str:

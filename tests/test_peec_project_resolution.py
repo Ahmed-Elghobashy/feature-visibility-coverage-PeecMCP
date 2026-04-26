@@ -30,6 +30,7 @@ def config(*, project: str | None = None, project_id: str | None = None) -> Expo
         list_projects=False,
         list_tools=False,
         connect_timeout=30.0,
+        chat_detail_concurrency=12,
     )
 
 

@@ -248,6 +248,7 @@ function App() {
   const [embeddingBackend, setEmbeddingBackend] = useState("hash");
   const [aggregationMode, setAggregationMode] = useState("prompt");
   const [featureMode, setFeatureMode] = useState("mock");
+  const [peecLimit, setPeecLimit] = useState("250");
   const [brandOptions, setBrandOptions] = useState<string[]>(["Peec AI"]);
   const [apiOnline, setApiOnline] = useState<boolean | null>(null);
   const [loading, setLoading] = useState(false);
@@ -456,6 +457,7 @@ function App() {
         form.append("project_id", projectId);
         form.append("start_date", startDate);
         form.append("end_date", endDate);
+        form.append("limit", String(Math.max(1, Number.parseInt(peecLimit || "250", 10) || 250)));
         if (brandsCsv) form.append("brands_csv", brandsCsv);
       }
       form.append("feature_file", featureFile);
@@ -583,6 +585,10 @@ function App() {
             <SelectControl label="PDF extraction" value={featureMode} options={["mock", "openai"]} onChange={setFeatureMode} />
             <SelectControl label="Embeddings" value={embeddingBackend} options={["hash", "bge-m3"]} onChange={setEmbeddingBackend} />
             <SelectControl label="Aggregation" value={aggregationMode} options={["response", "prompt", "prompt_model"]} onChange={setAggregationMode} />
+            <label className="field">
+              <span>Peec chat limit</span>
+              <input value={peecLimit} onChange={(event) => setPeecLimit(event.target.value.replace(/[^\d]/g, "") || "")} />
+            </label>
             {realModeSelected ? <div className="notice">Real LLM modes require `OPENAI_API_KEY` in the API server environment.</div> : null}
           </section>
         ) : null}
