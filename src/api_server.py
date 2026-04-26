@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -23,11 +25,29 @@ from starlette.routing import Route
 ROOT = Path(__file__).resolve().parent.parent
 VISIBILITY_SCRIPT = ROOT / "src" / "visibility_mvp.py"
 PEEC_EXPORT_SCRIPT = ROOT / "src" / "peec_mcp_export.py"
+CACHE_ROOT = ROOT / ".cache" / "feature_visibility"
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from feature_extraction import extract_features_from_pdf  # noqa: E402
+
+
+def load_dotenv(path: Path) -> None:
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip("'").strip('"')
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+load_dotenv(ROOT / ".env")
 
 
 def now_ms() -> int:
@@ -71,6 +91,31 @@ def run_pipeline(
     embedding_backend: str,
     aggregation_mode: str,
 ) -> dict[str, Any]:
+    return run_pipeline_capture(
+        prompts_csv=prompts_csv,
+        features_csv=features_csv,
+        brands_csv=brands_csv,
+        target_brand=target_brand,
+        output_dir=output_dir,
+        normalizer=normalizer,
+        brand_detector=brand_detector,
+        embedding_backend=embedding_backend,
+        aggregation_mode=aggregation_mode,
+    )
+
+
+def visibility_args(
+    *,
+    prompts_csv: Path,
+    features_csv: Path,
+    brands_csv: Path,
+    target_brand: str,
+    output_dir: Path,
+    normalizer: str,
+    brand_detector: str,
+    embedding_backend: str,
+    aggregation_mode: str,
+) -> list[str]:
     args = [
         sys.executable,
         str(VISIBILITY_SCRIPT),
@@ -95,33 +140,111 @@ def run_pipeline(
     ]
     if embedding_backend == "hash":
         args.extend(["--feature-threshold", "0.05", "--cluster-threshold", "0.2"])
+    return args
 
+
+def parse_visibility_stdout(stdout: str) -> tuple[list[dict[str, Any]], str]:
+    progress: list[dict[str, Any]] = []
+    plain_lines: list[str] = []
+    prefix = "__FV_PROGRESS__ "
+    for raw_line in stdout.splitlines():
+        if raw_line.startswith(prefix):
+            try:
+                progress.append(json.loads(raw_line[len(prefix):]))
+            except json.JSONDecodeError:
+                plain_lines.append(raw_line)
+        else:
+            plain_lines.append(raw_line)
+    cleaned = "\n".join(plain_lines).strip()
+    return progress, (cleaned + "\n" if cleaned else "")
+
+
+def run_pipeline_capture(
+    *,
+    prompts_csv: Path,
+    features_csv: Path,
+    brands_csv: Path,
+    target_brand: str,
+    output_dir: Path,
+    normalizer: str,
+    brand_detector: str,
+    embedding_backend: str,
+    aggregation_mode: str,
+) -> dict[str, Any]:
+    args = visibility_args(
+        prompts_csv=prompts_csv,
+        features_csv=features_csv,
+        brands_csv=brands_csv,
+        target_brand=target_brand,
+        output_dir=output_dir,
+        normalizer=normalizer,
+        brand_detector=brand_detector,
+        embedding_backend=embedding_backend,
+        aggregation_mode=aggregation_mode,
+    )
     result = subprocess.run(
         args,
         cwd=ROOT,
         capture_output=True,
         text=True,
         check=False,
+        env={**os.environ, "PYTHONUNBUFFERED": "1"},
     )
+    progress, cleaned_stdout = parse_visibility_stdout(result.stdout)
     if result.returncode != 0:
         return {
             "ok": False,
-            "stdout": result.stdout,
+            "stdout": cleaned_stdout,
             "stderr": result.stderr,
+            "progress": progress,
         }
 
     metadata_path = output_dir / "run_metadata.json"
     metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
     return {
         "ok": True,
-        "stdout": result.stdout,
+        "stdout": cleaned_stdout,
         "stderr": result.stderr,
         "overview": dataframe_records(output_dir / "feature_gap_overview.csv"),
         "details": dataframe_records(output_dir / "feature_gap_details.csv"),
         "coverage": dataframe_records(output_dir / "coverage_by_feature_cluster.csv"),
         "summary": read_text(output_dir / "feature_gap_summary.md"),
         "metadata": metadata,
+        "progress": progress,
     }
+
+
+def run_pipeline_stream(
+    *,
+    prompts_csv: Path,
+    features_csv: Path,
+    brands_csv: Path,
+    target_brand: str,
+    output_dir: Path,
+    normalizer: str,
+    brand_detector: str,
+    embedding_backend: str,
+    aggregation_mode: str,
+):
+    args = visibility_args(
+        prompts_csv=prompts_csv,
+        features_csv=features_csv,
+        brands_csv=brands_csv,
+        target_brand=target_brand,
+        output_dir=output_dir,
+        normalizer=normalizer,
+        brand_detector=brand_detector,
+        embedding_backend=embedding_backend,
+        aggregation_mode=aggregation_mode,
+    )
+    return subprocess.Popen(
+        args,
+        cwd=ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={**os.environ, "PYTHONUNBUFFERED": "1"},
+    )
 
 
 async def save_upload(upload: UploadFile, path: Path) -> Path:
@@ -139,6 +262,29 @@ def run_peec_export(
     output_csv: Path,
     limit: int = 250,
 ) -> dict[str, Any]:
+    cache_key = hashlib.sha256(
+        json.dumps(
+            {
+                "project_id": project_id,
+                "start_date": start_date,
+                "end_date": end_date,
+                "limit": limit,
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    cache_dir = CACHE_ROOT / "peec_exports"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cached_csv = cache_dir / f"{cache_key}.csv"
+    if cached_csv.exists():
+        output_csv.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(cached_csv, output_csv)
+        return {
+            "ok": True,
+            "stdout": f"Loaded cached Peec export from {cached_csv}\n",
+            "stderr": "",
+        }
+
     args = [
         sys.executable,
         str(PEEC_EXPORT_SCRIPT),
@@ -162,6 +308,8 @@ def run_peec_export(
         text=True,
         check=False,
     )
+    if result.returncode == 0 and output_csv.exists():
+        shutil.copy2(output_csv, cached_csv)
     return {
         "ok": result.returncode == 0,
         "stdout": result.stdout,
@@ -181,6 +329,14 @@ def summarize_peec_export_error(stdout: str, stderr: str) -> str:
     for line in reversed(lines):
         if "Peec MCP" in line or "Unauthorized" in line or "temporarily unavailable" in line:
             return line
+    return lines[-1]
+
+
+def summarize_pipeline_error(stdout: str, stderr: str) -> str:
+    text = (stderr or stdout).strip()
+    if not text:
+        return "Visibility coverage pipeline failed."
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
     return lines[-1]
 
 
@@ -454,9 +610,8 @@ async def analyze_upload_stream(request) -> StreamingResponse:
                 return
             yield step_finished("validation", tick, "Validated target brand")
 
-            started, tick = step_started("pipeline", "Running visibility coverage pipeline")
-            yield started
-            result = run_pipeline(
+            yield progress_event("stage", stage="pipeline", status="running", message="Running visibility coverage pipeline")
+            process = run_pipeline_stream(
                 prompts_csv=prompts_path,
                 features_csv=features_path,
                 brands_csv=brands_path,
@@ -467,11 +622,32 @@ async def analyze_upload_stream(request) -> StreamingResponse:
                 embedding_backend=str(form.get("embedding_backend") or "hash"),
                 aggregation_mode=str(form.get("aggregation_mode") or "prompt"),
             )
-            if not result["ok"]:
-                yield progress_event("error", error=result.get("stderr") or result.get("stdout") or "Analysis failed.")
+            assert process.stdout is not None
+            pipeline_stdout_lines: list[str] = []
+            for raw_line in process.stdout:
+                if raw_line.startswith("__FV_PROGRESS__ "):
+                    payload = json.loads(raw_line[len("__FV_PROGRESS__ "):])
+                    yield progress_event("stage", **payload)
+                else:
+                    pipeline_stdout_lines.append(raw_line)
+            stderr = process.stderr.read() if process.stderr is not None else ""
+            return_code = process.wait()
+            cleaned_stdout = "".join(pipeline_stdout_lines).strip()
+            if return_code != 0:
+                yield progress_event("error", error=summarize_pipeline_error(cleaned_stdout, stderr))
                 return
-            yield step_finished("pipeline", tick, "Pipeline finished")
-
+            metadata_path = workdir / "outputs" / "run_metadata.json"
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
+            result = {
+                "ok": True,
+                "stdout": (cleaned_stdout + "\n") if cleaned_stdout else "",
+                "stderr": stderr,
+                "overview": dataframe_records(workdir / "outputs" / "feature_gap_overview.csv"),
+                "details": dataframe_records(workdir / "outputs" / "feature_gap_details.csv"),
+                "coverage": dataframe_records(workdir / "outputs" / "coverage_by_feature_cluster.csv"),
+                "summary": read_text(workdir / "outputs" / "feature_gap_summary.md"),
+                "metadata": metadata,
+            }
             result["extracted_features"] = extracted_features
             result["extracted_text_preview"] = extracted_text[:12000]
             yield progress_event("result", result=result)
@@ -565,9 +741,8 @@ async def analyze_peec_stream(request) -> StreamingResponse:
                 return
             yield step_finished("validation", tick, "Validated target brand")
 
-            started, tick = step_started("pipeline", "Running visibility coverage pipeline")
-            yield started
-            result = run_pipeline(
+            yield progress_event("stage", stage="pipeline", status="running", message="Running visibility coverage pipeline")
+            process = run_pipeline_stream(
                 prompts_csv=prompts_path,
                 features_csv=features_path,
                 brands_csv=brands_path,
@@ -578,11 +753,32 @@ async def analyze_peec_stream(request) -> StreamingResponse:
                 embedding_backend=str(form.get("embedding_backend") or "hash"),
                 aggregation_mode=str(form.get("aggregation_mode") or "prompt"),
             )
-            if not result["ok"]:
-                yield progress_event("error", error=result.get("stderr") or result.get("stdout") or "Analysis failed.")
+            assert process.stdout is not None
+            pipeline_stdout_lines: list[str] = []
+            for raw_line in process.stdout:
+                if raw_line.startswith("__FV_PROGRESS__ "):
+                    payload = json.loads(raw_line[len("__FV_PROGRESS__ "):])
+                    yield progress_event("stage", **payload)
+                else:
+                    pipeline_stdout_lines.append(raw_line)
+            stderr = process.stderr.read() if process.stderr is not None else ""
+            return_code = process.wait()
+            cleaned_stdout = "".join(pipeline_stdout_lines).strip()
+            if return_code != 0:
+                yield progress_event("error", error=summarize_pipeline_error(cleaned_stdout, stderr))
                 return
-            yield step_finished("pipeline", tick, "Pipeline finished")
-
+            metadata_path = workdir / "outputs" / "run_metadata.json"
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
+            result = {
+                "ok": True,
+                "stdout": (cleaned_stdout + "\n") if cleaned_stdout else "",
+                "stderr": stderr,
+                "overview": dataframe_records(workdir / "outputs" / "feature_gap_overview.csv"),
+                "details": dataframe_records(workdir / "outputs" / "feature_gap_details.csv"),
+                "coverage": dataframe_records(workdir / "outputs" / "coverage_by_feature_cluster.csv"),
+                "summary": read_text(workdir / "outputs" / "feature_gap_summary.md"),
+                "metadata": metadata,
+            }
             result["peec_export_stdout"] = export_result["stdout"]
             result["peec_export_stderr"] = export_result["stderr"]
             result["extracted_features"] = extracted_features

@@ -41,6 +41,8 @@ import pandas as pd
 
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-m3"
 DEFAULT_NORMALIZER_MODEL = "gpt-4.1-mini"
+PROGRESS_PREFIX = "__FV_PROGRESS__ "
+CACHE_ROOT = Path(".cache/feature_visibility")
 
 PROMPT_COLUMNS = ("prompt", "raw_prompt", "query", "question", "text")
 RESPONSE_COLUMNS = ("response", "answer", "ai_response", "model_response", "output")
@@ -72,14 +74,70 @@ class Config:
     aggregation_mode: str
 
 
+_JSON_CACHE: dict[str, dict[str, object]] = {}
+
+
+def emit_progress(stage: str, status: str, message: str, **extra: object) -> None:
+    payload = {
+        "stage": stage,
+        "status": status,
+        "message": message,
+        "timestamp_ms": int(time.time() * 1000),
+        **extra,
+    }
+    print(PROGRESS_PREFIX + json.dumps(payload, ensure_ascii=False), flush=True)
+
+
+def cache_file(name: str) -> Path:
+    CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+    return CACHE_ROOT / name
+
+
+def load_json_cache(name: str) -> dict[str, object]:
+    if name in _JSON_CACHE:
+        return _JSON_CACHE[name]
+    path = cache_file(name)
+    if path.exists():
+        try:
+            _JSON_CACHE[name] = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            _JSON_CACHE[name] = {}
+    else:
+        _JSON_CACHE[name] = {}
+    return _JSON_CACHE[name]
+
+
+def cache_lookup(name: str, key_payload: object) -> object | None:
+    key = hashlib.sha256(json.dumps(key_payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+    return load_json_cache(name).get(key)
+
+
+def cache_store(name: str, key_payload: object, value: object) -> None:
+    key = hashlib.sha256(json.dumps(key_payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+    cache = load_json_cache(name)
+    cache[key] = value
+    cache_file(name).write_text(json.dumps(cache, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
 def main() -> int:
     config = parse_args()
     config.output_dir.mkdir(parents=True, exist_ok=True)
     load_dotenv(Path(".env"))
 
+    load_started = time.perf_counter()
+    emit_progress("load_inputs", "running", "Loading prompts, features, and brands")
     prompts = pd.read_csv(config.prompts_csv)
     features = pd.read_csv(config.features_csv)
     brands = load_brands(config)
+    emit_progress(
+        "load_inputs",
+        "completed",
+        "Loaded prompts, features, and brands",
+        duration_ms=int((time.perf_counter() - load_started) * 1000),
+        prompt_rows=len(prompts),
+        feature_rows=len(features),
+        brand_rows=len(brands),
+    )
 
     prompt_col = pick_column(prompts, PROMPT_COLUMNS, "prompts")
     response_col = pick_optional_column(prompts, RESPONSE_COLUMNS)
@@ -98,11 +156,23 @@ def main() -> int:
         if config.normalizer == "openai_mock"
         else "heuristic:v1"
     )
+    normalize_started = time.perf_counter()
+    emit_progress("normalize_queries", "running", "Normalizing prompts into canonical queries")
     prompts["canonical_query"] = [
         normalize_prompt(str(prompt), config, brands)
         for prompt in prompts[prompt_col].fillna("")
     ]
+    emit_progress(
+        "normalize_queries",
+        "completed",
+        "Normalized prompts into canonical queries",
+        duration_ms=int((time.perf_counter() - normalize_started) * 1000),
+        prompt_rows=len(prompts),
+        normalizer=config.normalizer,
+    )
 
+    embed_started = time.perf_counter()
+    emit_progress("embed_text", "running", "Embedding queries and features")
     embedder = make_embedder(config)
     query_vectors = embedder.encode(prompts["canonical_query"].tolist())
     feature_texts = [
@@ -110,7 +180,18 @@ def main() -> int:
         for _, row in features.iterrows()
     ]
     feature_vectors = embedder.encode(feature_texts)
+    emit_progress(
+        "embed_text",
+        "completed",
+        "Embedded queries and features",
+        duration_ms=int((time.perf_counter() - embed_started) * 1000),
+        embedding_backend=config.embedding_backend,
+        query_count=len(prompts),
+        feature_count=len(features),
+    )
 
+    cluster_started = time.perf_counter()
+    emit_progress("cluster_queries", "running", "Clustering normalized queries")
     clusters = cluster_vectors(
         query_vectors,
         threshold=config.cluster_threshold,
@@ -120,13 +201,29 @@ def main() -> int:
 
     cluster_labels = label_clusters(prompts, query_vectors)
     prompts["cluster_label"] = prompts["cluster_id"].map(cluster_labels)
+    emit_progress(
+        "cluster_queries",
+        "completed",
+        "Clustered normalized queries",
+        duration_ms=int((time.perf_counter() - cluster_started) * 1000),
+        cluster_count=int(prompts["cluster_id"].nunique()),
+    )
 
+    feature_map_started = time.perf_counter()
+    emit_progress("map_features", "running", "Mapping queries to product features")
     feature_mapping = map_features(
         query_vectors=query_vectors,
         feature_vectors=feature_vectors,
         features=features,
         feature_name_col=feature_name_col,
         threshold=config.feature_threshold,
+    )
+    emit_progress(
+        "map_features",
+        "completed",
+        "Mapped queries to product features",
+        duration_ms=int((time.perf_counter() - feature_map_started) * 1000),
+        matched_rows=int(sum(1 for item in feature_mapping if item["feature_id"])),
     )
 
     text_for_brand_detection = (
@@ -158,14 +255,47 @@ def main() -> int:
         for m in feature_mapping
     ]
 
+    brand_started = time.perf_counter()
+    emit_progress("detect_brands", "running", "Detecting brand presence in responses")
     brand_rows = expand_brand_rows(rows, brands, text_for_brand_detection, config)
+    emit_progress(
+        "detect_brands",
+        "completed",
+        "Detected brand presence in responses",
+        duration_ms=int((time.perf_counter() - brand_started) * 1000),
+        expanded_rows=len(brand_rows),
+        brand_detector=config.brand_detector,
+    )
+
+    coverage_started = time.perf_counter()
+    emit_progress("aggregate_coverage", "running", "Aggregating coverage by feature and cluster")
     coverage = build_coverage(brand_rows, config.min_coverage_n, config.aggregation_mode)
     cluster_summary = build_cluster_summary(rows)
+    emit_progress(
+        "aggregate_coverage",
+        "completed",
+        "Aggregated coverage by feature and cluster",
+        duration_ms=int((time.perf_counter() - coverage_started) * 1000),
+        coverage_rows=len(coverage),
+        cluster_rows=len(cluster_summary),
+    )
+
+    gap_started = time.perf_counter()
+    emit_progress("compute_gaps", "running", "Computing feature visibility gaps")
     target_brand = resolve_target_brand(brands, config)
     feature_gap_overview = build_feature_gap_overview(coverage, rows, target_brand)
     feature_gap_details = build_feature_gap_details(coverage, rows, target_brand)
     pm_summary = build_pm_summary(feature_gap_overview, target_brand)
+    emit_progress(
+        "compute_gaps",
+        "completed",
+        "Computed feature visibility gaps",
+        duration_ms=int((time.perf_counter() - gap_started) * 1000),
+        gap_rows=len(feature_gap_overview),
+    )
 
+    write_started = time.perf_counter()
+    emit_progress("write_outputs", "running", "Writing CSV and summary outputs")
     write_outputs(
         config.output_dir,
         brand_rows,
@@ -177,6 +307,13 @@ def main() -> int:
         config,
         brands,
         target_brand,
+    )
+    emit_progress(
+        "write_outputs",
+        "completed",
+        "Wrote CSV and summary outputs",
+        duration_ms=int((time.perf_counter() - write_started) * 1000),
+        output_dir=str(config.output_dir),
     )
     print_summary(config.output_dir, brand_rows, coverage, feature_gap_overview, target_brand, config, brands)
     return 0
@@ -368,6 +505,16 @@ def normalize_prompt_openai(prompt: str, model: str, brands: pd.DataFrame) -> st
     if not api_key:
         raise RuntimeError("--normalizer openai requires OPENAI_API_KEY.")
 
+    cache_key = {
+        "kind": "normalizer",
+        "model": model,
+        "prompt": prompt,
+        "brands": brands["brand_name"].astype(str).tolist(),
+    }
+    cached = cache_lookup("openai_normalizer.json", cache_key)
+    if isinstance(cached, str) and cached.strip():
+        return cached
+
     payload = {
         "model": model,
         "messages": [
@@ -402,7 +549,9 @@ def normalize_prompt_openai(prompt: str, model: str, brands: pd.DataFrame) -> st
         raise RuntimeError(f"OpenAI normalizer call failed: {exc}") from exc
 
     content = body["choices"][0]["message"]["content"]
-    return re.sub(r"\s+", " ", content.strip().casefold())
+    normalized = re.sub(r"\s+", " ", content.strip().casefold())
+    cache_store("openai_normalizer.json", cache_key, normalized)
+    return normalized
 
 
 def normalize_prompt_openai_mock(prompt: str, model: str, brands: pd.DataFrame) -> str:
@@ -615,6 +764,17 @@ def judge_brand_openai(text: str, brand: str, model: str, aliases: Sequence[str]
     if not api_key:
         raise RuntimeError("--brand-detector openai requires OPENAI_API_KEY.")
 
+    cache_key = {
+        "kind": "brand_detector",
+        "model": model,
+        "brand": brand,
+        "aliases": list(aliases or []),
+        "response": text,
+    }
+    cached = cache_lookup("openai_brand_detector.json", cache_key)
+    if isinstance(cached, bool):
+        return cached
+
     payload = {
         "model": model,
         "messages": [
@@ -663,7 +823,9 @@ def judge_brand_openai(text: str, brand: str, model: str, aliases: Sequence[str]
         parsed = json.loads(content)
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"OpenAI brand detector returned invalid JSON: {content}") from exc
-    return bool(parsed.get("brand_present"))
+    verdict = bool(parsed.get("brand_present"))
+    cache_store("openai_brand_detector.json", cache_key, verdict)
+    return verdict
 
 
 def detect_brand(text: str, brand: str, aliases: Sequence[str], config: Config) -> bool:
