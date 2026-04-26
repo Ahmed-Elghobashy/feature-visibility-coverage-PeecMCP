@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+from pandas.errors import EmptyDataError
 from starlette.applications import Starlette
 from starlette.datastructures import UploadFile
 from starlette.middleware.cors import CORSMiddleware
@@ -185,7 +186,10 @@ def extract_brand_name(value: Any) -> str:
 
 
 def derive_brands_csv_from_prompts(prompts_csv: Path, output_csv: Path, target_brand: str) -> Path:
-    frame = pd.read_csv(prompts_csv)
+    try:
+        frame = pd.read_csv(prompts_csv)
+    except EmptyDataError as exc:
+        raise ValueError("Peec export returned no prompt rows for the selected filters.") from exc
     names: list[str] = []
     if target_brand.strip():
         names.append(target_brand.strip())
@@ -322,6 +326,11 @@ async def analyze_peec(request) -> JSONResponse:
         )
         if not export_result["ok"]:
             return JSONResponse({"ok": False, "error": export_result["stderr"] or export_result["stdout"]}, status_code=500)
+        if not prompts_path.exists() or prompts_path.stat().st_size == 0:
+            return JSONResponse(
+                {"ok": False, "error": "Peec export returned no prompt rows for the selected filters."},
+                status_code=400,
+            )
 
         try:
             features_path, extracted_features, extracted_text = await prepare_feature_file(form, inputs_dir)
@@ -329,10 +338,13 @@ async def analyze_peec(request) -> JSONResponse:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
 
         brands_upload = form.get("brands_csv")
-        if isinstance(brands_upload, UploadFile):
-            brands_path = await save_upload(brands_upload, inputs_dir / "brands.csv")
-        else:
-            brands_path = derive_brands_csv_from_prompts(prompts_path, inputs_dir / "brands_from_peec.csv", target_brand)
+        try:
+            if isinstance(brands_upload, UploadFile):
+                brands_path = await save_upload(brands_upload, inputs_dir / "brands.csv")
+            else:
+                brands_path = derive_brands_csv_from_prompts(prompts_path, inputs_dir / "brands_from_peec.csv", target_brand)
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
 
         target_error = validate_target_brand(target_brand, brands_path)
         if target_error:
