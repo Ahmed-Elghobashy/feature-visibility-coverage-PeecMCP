@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +16,7 @@ from pandas.errors import EmptyDataError
 from starlette.applications import Starlette
 from starlette.datastructures import UploadFile
 from starlette.middleware.cors import CORSMiddleware
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
 
@@ -27,6 +28,24 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from feature_extraction import extract_features_from_pdf  # noqa: E402
+
+
+def now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def progress_event(event_type: str, **payload: Any) -> bytes:
+    body = {"type": event_type, "timestamp_ms": now_ms(), **payload}
+    return (json.dumps(body) + "\n").encode("utf-8")
+
+
+def step_started(name: str, message: str) -> tuple[bytes, float]:
+    return progress_event("stage", stage=name, status="running", message=message), time.perf_counter()
+
+
+def step_finished(name: str, started_at: float, message: str, **extra: Any) -> bytes:
+    duration_ms = int((time.perf_counter() - started_at) * 1000)
+    return progress_event("stage", stage=name, status="completed", message=message, duration_ms=duration_ms, **extra)
 
 
 def dataframe_records(path: Path) -> list[dict[str, Any]]:
@@ -391,11 +410,197 @@ async def analyze_peec(request) -> JSONResponse:
         shutil.rmtree(workdir, ignore_errors=True)
 
 
+async def analyze_upload_stream(request) -> StreamingResponse:
+    form = await request.form()
+
+    async def generate():
+        yield progress_event("run", status="started", source="csv")
+        prompts = form.get("prompts_csv")
+        brands = form.get("brands_csv")
+        if not isinstance(prompts, UploadFile) or not isinstance(brands, UploadFile):
+            yield progress_event("error", error="prompts_csv and brands_csv are required.")
+            return
+
+        workdir = Path(tempfile.mkdtemp(prefix="feature_visibility_api_stream_"))
+        try:
+            inputs_dir = workdir / "inputs"
+
+            started, tick = step_started("inputs", "Saving uploaded CSV files")
+            yield started
+            prompts_path = await save_upload(prompts, inputs_dir / "prompts.csv")
+            brands_path = await save_upload(brands, inputs_dir / "brands.csv")
+            yield step_finished("inputs", tick, "Saved prompt and brand inputs")
+
+            started, tick = step_started("features", "Preparing feature descriptions")
+            yield started
+            try:
+                features_path, extracted_features, extracted_text = await prepare_feature_file(form, inputs_dir)
+            except ValueError as exc:
+                yield progress_event("error", error=str(exc))
+                return
+            yield step_finished(
+                "features",
+                tick,
+                "Prepared feature descriptions",
+                feature_count=len(extracted_features),
+            )
+
+            started, tick = step_started("validation", "Validating target brand")
+            yield started
+            target_brand = str(form.get("target_brand") or first_brand_name(brands_path))
+            target_error = validate_target_brand(target_brand, brands_path)
+            if target_error:
+                yield progress_event("error", error=target_error)
+                return
+            yield step_finished("validation", tick, "Validated target brand")
+
+            started, tick = step_started("pipeline", "Running visibility coverage pipeline")
+            yield started
+            result = run_pipeline(
+                prompts_csv=prompts_path,
+                features_csv=features_path,
+                brands_csv=brands_path,
+                target_brand=target_brand,
+                output_dir=workdir / "outputs",
+                normalizer=str(form.get("normalizer") or "openai_mock"),
+                brand_detector=str(form.get("brand_detector") or "openai_mock"),
+                embedding_backend=str(form.get("embedding_backend") or "hash"),
+                aggregation_mode=str(form.get("aggregation_mode") or "prompt"),
+            )
+            if not result["ok"]:
+                yield progress_event("error", error=result.get("stderr") or result.get("stdout") or "Analysis failed.")
+                return
+            yield step_finished("pipeline", tick, "Pipeline finished")
+
+            result["extracted_features"] = extracted_features
+            result["extracted_text_preview"] = extracted_text[:12000]
+            yield progress_event("result", result=result)
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
+
+    return StreamingResponse(generate(), media_type="application/x-ndjson")
+
+
+async def analyze_peec_stream(request) -> StreamingResponse:
+    form = await request.form()
+
+    async def generate():
+        yield progress_event("run", status="started", source="peec")
+        project_id = str(form.get("project_id") or "").strip()
+        start_date = str(form.get("start_date") or "").strip()
+        end_date = str(form.get("end_date") or "").strip()
+        target_brand = str(form.get("target_brand") or "").strip()
+        if not start_date or not end_date:
+            yield progress_event("error", error="start_date and end_date are required.")
+            return
+        if not target_brand:
+            yield progress_event("error", error="target_brand is required for Peec MCP runs.")
+            return
+
+        workdir = Path(tempfile.mkdtemp(prefix="feature_visibility_peec_stream_"))
+        try:
+            inputs_dir = workdir / "inputs"
+            prompts_path = inputs_dir / "peec_chats.csv"
+
+            started, tick = step_started("peec_export", "Exporting prompts and responses from Peec MCP")
+            yield started
+            export_result = run_peec_export(
+                project_id=project_id,
+                start_date=start_date,
+                end_date=end_date,
+                output_csv=prompts_path,
+                limit=int(str(form.get("limit") or "10000")),
+            )
+            if not export_result["ok"]:
+                yield progress_event(
+                    "error",
+                    error=summarize_peec_export_error(export_result["stdout"], export_result["stderr"]),
+                )
+                return
+            if not prompts_path.exists() or prompts_path.stat().st_size == 0:
+                yield progress_event("error", error="Peec export returned no prompt rows for the selected filters.")
+                return
+            prompt_rows = 0
+            try:
+                prompt_rows = int(len(pd.read_csv(prompts_path)))
+            except EmptyDataError:
+                yield progress_event("error", error="Peec export returned no prompt rows for the selected filters.")
+                return
+            yield step_finished("peec_export", tick, "Peec export completed", prompt_rows=prompt_rows)
+
+            started, tick = step_started("features", "Preparing feature descriptions")
+            yield started
+            try:
+                features_path, extracted_features, extracted_text = await prepare_feature_file(form, inputs_dir)
+            except ValueError as exc:
+                yield progress_event("error", error=str(exc))
+                return
+            yield step_finished(
+                "features",
+                tick,
+                "Prepared feature descriptions",
+                feature_count=len(extracted_features),
+            )
+
+            started, tick = step_started("brands", "Resolving tracked brands")
+            yield started
+            brands_upload = form.get("brands_csv")
+            try:
+                if isinstance(brands_upload, UploadFile):
+                    brands_path = await save_upload(brands_upload, inputs_dir / "brands.csv")
+                    brand_source = "upload"
+                else:
+                    brands_path = derive_brands_csv_from_prompts(prompts_path, inputs_dir / "brands_from_peec.csv", target_brand)
+                    brand_source = "peec_mentions"
+            except ValueError as exc:
+                yield progress_event("error", error=str(exc))
+                return
+            yield step_finished("brands", tick, "Tracked brands resolved", brand_source=brand_source)
+
+            started, tick = step_started("validation", "Validating target brand")
+            yield started
+            target_error = validate_target_brand(target_brand, brands_path)
+            if target_error:
+                yield progress_event("error", error=target_error)
+                return
+            yield step_finished("validation", tick, "Validated target brand")
+
+            started, tick = step_started("pipeline", "Running visibility coverage pipeline")
+            yield started
+            result = run_pipeline(
+                prompts_csv=prompts_path,
+                features_csv=features_path,
+                brands_csv=brands_path,
+                target_brand=target_brand,
+                output_dir=workdir / "outputs",
+                normalizer=str(form.get("normalizer") or "openai_mock"),
+                brand_detector=str(form.get("brand_detector") or "openai_mock"),
+                embedding_backend=str(form.get("embedding_backend") or "hash"),
+                aggregation_mode=str(form.get("aggregation_mode") or "prompt"),
+            )
+            if not result["ok"]:
+                yield progress_event("error", error=result.get("stderr") or result.get("stdout") or "Analysis failed.")
+                return
+            yield step_finished("pipeline", tick, "Pipeline finished")
+
+            result["peec_export_stdout"] = export_result["stdout"]
+            result["peec_export_stderr"] = export_result["stderr"]
+            result["extracted_features"] = extracted_features
+            result["extracted_text_preview"] = extracted_text[:12000]
+            yield progress_event("result", result=result)
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
+
+    return StreamingResponse(generate(), media_type="application/x-ndjson")
+
+
 routes = [
     Route("/api/health", health, methods=["GET"]),
     Route("/api/analyze-sample", analyze_sample, methods=["POST"]),
     Route("/api/analyze", analyze_upload, methods=["POST"]),
     Route("/api/analyze-peec", analyze_peec, methods=["POST"]),
+    Route("/api/analyze-stream", analyze_upload_stream, methods=["POST"]),
+    Route("/api/analyze-peec-stream", analyze_peec_stream, methods=["POST"]),
 ]
 
 app = Starlette(debug=False, routes=routes)

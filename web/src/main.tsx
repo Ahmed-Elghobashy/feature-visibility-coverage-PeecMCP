@@ -50,6 +50,29 @@ type ApiResult = {
   extracted_text_preview?: string;
 };
 
+type ProgressEvent = {
+  type: "run" | "stage" | "error" | "result";
+  timestamp_ms: number;
+  stage?: string;
+  status?: string;
+  message?: string;
+  duration_ms?: number;
+  result?: ApiResult;
+  error?: string;
+  prompt_rows?: number;
+  feature_count?: number;
+  brand_source?: string;
+};
+
+type RunLogEntry = {
+  id: string;
+  stage: string;
+  status: string;
+  message: string;
+  timestampMs: number;
+  durationMs?: number;
+};
+
 type Mode = "openai_mock" | "heuristic" | "openai";
 type BrandMode = "openai_mock" | "keyword" | "openai";
 
@@ -234,6 +257,8 @@ function App() {
   const [resultSource, setResultSource] = useState<"sample" | "peec" | "csv" | null>(null);
   const [resultsMode, setResultsMode] = useState<"gaps" | "all">("all");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [runLogs, setRunLogs] = useState<RunLogEntry[]>([]);
+  const [activeStage, setActiveStage] = useState("");
 
   const sortedOverview = useMemo(() => {
     const rows = [...(result?.overview ?? [])];
@@ -257,6 +282,101 @@ function App() {
   const csvReady = Boolean(promptsCsv && brandsCsv && targetBrand && featureFile);
   const uploadReady = dataSource === "peec" ? peecReady : csvReady;
   const realModeSelected = normalizer === "openai" || brandDetector === "openai" || featureMode === "openai";
+
+  function appendLog(event: ProgressEvent) {
+    if (event.type === "run") {
+      setRunLogs([
+        {
+          id: `run-${event.timestamp_ms}`,
+          stage: "run",
+          status: event.status || "started",
+          message: event.message || "Run started",
+          timestampMs: event.timestamp_ms,
+        },
+      ]);
+      setActiveStage(event.message || "Run started");
+      return;
+    }
+    if (event.type === "stage") {
+      setRunLogs((current) => [
+        ...current,
+        {
+          id: `${event.stage}-${event.status}-${event.timestamp_ms}`,
+          stage: event.stage || "stage",
+          status: event.status || "running",
+          message: event.message || event.stage || "Stage update",
+          timestampMs: event.timestamp_ms,
+          durationMs: event.duration_ms,
+        },
+      ]);
+      setActiveStage(event.message || event.stage || "Running");
+      return;
+    }
+    if (event.type === "error") {
+      setRunLogs((current) => [
+        ...current,
+        {
+          id: `error-${event.timestamp_ms}`,
+          stage: "error",
+          status: "failed",
+          message: event.error || "Run failed",
+          timestampMs: event.timestamp_ms,
+        },
+      ]);
+      setActiveStage("Run failed");
+    }
+  }
+
+  async function consumeStream(response: Response) {
+    if (!response.body) throw new Error("Streaming response body is not available.");
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let finalResult: ApiResult | null = null;
+    let streamError = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const event = JSON.parse(line) as ProgressEvent;
+        if (event.type === "result" && event.result) {
+          finalResult = event.result;
+          setRunLogs((current) => [
+            ...current,
+            {
+              id: `result-${event.timestamp_ms}`,
+              stage: "result",
+              status: "completed",
+              message: "Analysis finished",
+              timestampMs: event.timestamp_ms,
+            },
+          ]);
+          setActiveStage("Analysis finished");
+        } else if (event.type === "error") {
+          appendLog(event);
+          streamError = event.error || "Analysis failed.";
+        } else {
+          appendLog(event);
+        }
+      }
+    }
+
+    if (buffer.trim()) {
+      const event = JSON.parse(buffer) as ProgressEvent;
+      if (event.type === "result" && event.result) finalResult = event.result;
+      else if (event.type === "error") streamError = event.error || "Analysis failed.";
+      else appendLog(event);
+    }
+
+    if (streamError) throw new Error(streamError);
+    if (!finalResult?.ok) throw new Error(finalResult?.error || finalResult?.stderr || "Analysis failed.");
+    return finalResult;
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -297,6 +417,8 @@ function App() {
     setError("");
     setSelectedIndex(0);
     setTargetBrand("Peec AI");
+    setRunLogs([]);
+    setActiveStage("Running sample analysis");
     try {
       const response = await fetch("/api/analyze-sample", {
         method: "POST",
@@ -318,16 +440,18 @@ function App() {
     setLoading(true);
     setError("");
     setSelectedIndex(0);
+    setRunLogs([]);
+    setActiveStage("Preparing analysis");
     try {
       if (!featureFile) throw new Error("Feature CSV or PDF is required.");
 
       const form = new FormData();
-      let endpoint = "/api/analyze-peec";
+      let endpoint = "/api/analyze-peec-stream";
       if (dataSource === "csv") {
         if (!promptsCsv || !brandsCsv) throw new Error("CSV fallback requires Prompts CSV and Brands CSV.");
         form.append("prompts_csv", promptsCsv);
         form.append("brands_csv", brandsCsv);
-        endpoint = "/api/analyze";
+        endpoint = "/api/analyze-stream";
       } else {
         form.append("project_id", projectId);
         form.append("start_date", startDate);
@@ -343,8 +467,11 @@ function App() {
       form.append("feature_mode", featureMode);
 
       const response = await fetch(endpoint, { method: "POST", body: form });
-      const data = (await response.json()) as ApiResult;
-      if (!response.ok || !data.ok) throw new Error(data.error || data.stderr || "Analysis failed.");
+      if (!response.ok && !response.body) {
+        const data = (await response.json()) as ApiResult;
+        throw new Error(data.error || data.stderr || "Analysis failed.");
+      }
+      const data = await consumeStream(response);
       setResult(data);
       setResultSource(dataSource);
     } catch (err) {
@@ -444,7 +571,7 @@ function App() {
           <div className="top-actions">
             <div className="status-pill">
               {loading ? <Loader2 className="spin" size={16} /> : result?.ok ? <CheckCircle2 size={16} /> : <AlertCircle size={16} />}
-              {loading ? "Running analysis" : result?.ok ? `Analysis ready · ${resultSource}` : uploadReady ? "Ready to run" : "Waiting for inputs"}
+              {loading ? activeStage || "Running analysis" : result?.ok ? `Analysis ready · ${resultSource}` : uploadReady ? "Ready to run" : "Waiting for inputs"}
             </div>
           </div>
         </header>
@@ -471,6 +598,31 @@ function App() {
           <div className="kpi"><span>Features</span><strong>{featureCount}</strong></div>
           <div className="kpi"><span>Rows analyzed</span><strong>{result?.metadata?.brand_count ? String(result.metadata.brand_count) : "-"}</strong></div>
         </section>
+
+        {runLogs.length ? (
+          <section className="run-log-panel">
+            <div className="section-heading">
+              <div>
+                <h2>Run buffer</h2>
+                <p>{loading ? "Live stage updates" : "Last run stages"}</p>
+              </div>
+            </div>
+            <div className="run-log-list">
+              {runLogs.map((entry) => (
+                <div key={entry.id} className="run-log-entry">
+                  <div className="run-log-meta">
+                    <span className={`severity severity-${entry.status === "failed" ? "high" : entry.status === "completed" ? "low" : "medium"}`}>
+                      {entry.status}
+                    </span>
+                    <strong>{entry.stage}</strong>
+                    {entry.durationMs !== undefined ? <span>{entry.durationMs} ms</span> : null}
+                  </div>
+                  <p>{entry.message}</p>
+                </div>
+              ))}
+            </div>
+          </section>
+        ) : null}
 
         <div className="content-grid">
           <section className="results-column">

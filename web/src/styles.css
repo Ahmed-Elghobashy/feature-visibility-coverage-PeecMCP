@@ -436,6 +436,45 @@ p {
   margin-bottom: 18px;
 }
 
+.run-log-panel {
+  margin-bottom: 18px;
+  border: 1px solid #e3d6fb;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 16px;
+}
+
+.run-log-list {
+  display: grid;
+  gap: 10px;
+}
+
+.run-log-entry {
+  border: 1px solid #eadffc;
+  border-radius: 8px;
+  padding: 12px;
+  background: #fcfaff;
+}
+
+.run-log-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+.run-log-meta strong {
+  font-size: 13px;
+  text-transform: uppercase;
+}
+
+.run-log-meta span:last-child {
+  color: #76698a;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .kpi {
   min-height: 92px;
   padding: 16px;
