@@ -150,8 +150,8 @@ def parse_args() -> ExportConfig:
 async def export(config: ExportConfig) -> None:
     print(f"Connecting to Peec MCP at {config.server_url} ...", flush=True)
     storage = JsonTokenStorage(config.token_path)
-    for attempt in range(2):
-        access_token = await get_access_token(config, force_reauth=attempt > 0)
+    access_token = await get_access_token(config)
+    for attempt in range(4):
         try:
             await export_with_token(config, access_token)
             return
@@ -159,6 +159,15 @@ async def export(config: ExportConfig) -> None:
             if attempt == 0 and has_http_status(exc, 401):
                 print("Stored Peec token was rejected. Reauthorizing ...", flush=True)
                 storage.clear_tokens()
+                access_token = await get_access_token(config, force_reauth=True)
+                continue
+            if has_any_http_status(exc, {502, 503, 504}) and attempt < 3:
+                delay_seconds = attempt + 1
+                print(
+                    f"Peec MCP is temporarily unavailable. Retrying in {delay_seconds}s ...",
+                    flush=True,
+                )
+                await asyncio.sleep(delay_seconds)
                 continue
             raise
 
@@ -652,11 +661,23 @@ def has_http_status(exc: BaseException, status_code: int) -> bool:
     return False
 
 
+def has_any_http_status(exc: BaseException, status_codes: set[int]) -> bool:
+    for item in iter_exceptions(exc):
+        if isinstance(item, httpx.HTTPStatusError) and item.response.status_code in status_codes:
+            return True
+    return False
+
+
 def format_error(exc: BaseException) -> str:
     for item in iter_exceptions(exc):
         if isinstance(item, httpx.HTTPStatusError):
             if item.response.status_code == 401:
                 return "Peec MCP returned 401 Unauthorized. Reconnect your Peec OAuth session and try again."
+            if item.response.status_code in {502, 503, 504}:
+                return (
+                    f"Peec MCP is temporarily unavailable ({item.response.status_code}). "
+                    "Retry in a moment."
+                )
             return f"Peec MCP HTTP error {item.response.status_code}: {item}"
     return str(exc)
 

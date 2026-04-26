@@ -10,7 +10,7 @@ import httpx
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from peec_mcp_export import format_error, has_http_status  # noqa: E402
+from peec_mcp_export import format_error, has_any_http_status, has_http_status  # noqa: E402
 
 
 class PeecErrorFormattingTests(unittest.TestCase):
@@ -24,6 +24,18 @@ class PeecErrorFormattingTests(unittest.TestCase):
         self.assertEqual(
             format_error(group),
             "Peec MCP returned 401 Unauthorized. Reconnect your Peec OAuth session and try again.",
+        )
+
+    def test_502_inside_exception_group_is_detected_and_formatted(self) -> None:
+        request = httpx.Request("POST", "https://api.peec.ai/mcp")
+        response = httpx.Response(502, request=request)
+        error = httpx.HTTPStatusError("bad gateway", request=request, response=response)
+        group = ExceptionGroup("taskgroup", [error])
+
+        self.assertTrue(has_any_http_status(group, {502, 503, 504}))
+        self.assertEqual(
+            format_error(group),
+            "Peec MCP is temporarily unavailable (502). Retry in a moment.",
         )
 
 
